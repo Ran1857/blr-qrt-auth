@@ -626,6 +626,11 @@ function showMsalSignInBtn(){
     if(ok){
       btn.remove();
       try{
+        /* Discover actual column names before fetching */
+        var cols = await graphDiscoverListColumns();
+        var mappedFields = autoMapColumns(cols);
+        if(mappedFields) SP_CONFIG.fields = mappedFields;
+
         var items = await graphFetchAllItems();
         if(items.length > 0){
           var sampleKeys = Object.keys(items[0]).filter(function(k){ return !k.startsWith('@'); });
@@ -716,6 +721,74 @@ async function graphGetItemCount(){
     var d = await r.json();
     return typeof d['@odata.count'] === 'number' ? d['@odata.count'] : -1;
   }catch(e){ return -1; }
+}
+
+/* ── AUTO COLUMN DISCOVERY ────────────────────────────────────────────────
+   Fetches the list's column definitions and maps display names → internal
+   names so SP_CONFIG.fields is always correct regardless of how the list
+   was created.                                                             */
+async function graphDiscoverListColumns(){
+  try{
+    var siteId = await graphGetSiteId();
+    var lName  = encodeURIComponent(SP_CONFIG.listName);
+    var token  = await msalGetToken();
+    var r = await fetch(
+      'https://graph.microsoft.com/v1.0/sites/'+siteId+'/lists/'+lName+
+      '/columns?$select=name,displayName,type&$top=100',
+      { headers:{'Authorization':'Bearer '+token,'Accept':'application/json'} }
+    );
+    if(!r.ok){ console.warn('[Columns] Discovery failed:',r.status); return null; }
+    var d = await r.json();
+    return d.value || [];
+  }catch(e){ console.warn('[Columns] Error:',e.message); return null; }
+}
+
+/* Match discovered columns to required dashboard fields by display name.
+   Returns an object like SP_CONFIG.fields with confirmed internal names.  */
+function autoMapColumns(cols){
+  if(!cols || !cols.length) return null;
+
+  /* Log all columns for diagnostics */
+  console.group('%c[BLR QRT] SharePoint columns discovered','background:#0070F2;color:#fff;padding:2px 6px;border-radius:3px');
+  cols.forEach(function(c){
+    console.log('%c'+c.name,'font-weight:bold','('+c.type+') — "'+c.displayName+'"');
+  });
+  console.groupEnd();
+
+  /* Pattern rules: each required field → regex(es) that match its display name */
+  var RULES = {
+    user:      [/pseudo.?user.?code/i, /user.?code/i, /^(title|agent|reviewer|assignee)$/i],
+    startDate: [/start.?date/i, /start.?time/i, /begin.?date/i],
+    endDate:   [/end.?date/i,   /finish.?date/i, /end.?time/i,  /compl.+date/i],
+    timeMins:  [/time.?spent/i, /duration/i,     /minutes?/i],
+    activity:  [/activity.{0,10}task/i, /task.{0,10}activity/i, /^activity$/i, /^task$/i, /activity.?type/i],
+    client:    [/batch.{0,10}report/i,  /report.{0,10}id/i,     /batch.?id/i,  /^client$/i],
+    status:    [/^status$/i, /completion.?status/i, /state$/i]
+  };
+
+  var result = {};
+  Object.keys(RULES).forEach(function(field){
+    var patterns = RULES[field];
+    for(var pi=0; pi<patterns.length; pi++){
+      var pat = patterns[pi];
+      var col = null;
+      for(var ci=0; ci<cols.length; ci++){
+        if(pat.test(cols[ci].displayName || '')){
+          col = cols[ci];
+          break;
+        }
+      }
+      if(col){ result[field] = col.name; break; }
+    }
+    if(!result[field]){
+      /* Fallback: keep the configured value */
+      result[field] = SP_CONFIG.fields[field];
+      console.warn('[Columns] Could not auto-map field "'+field+'" — keeping "'+SP_CONFIG.fields[field]+'"');
+    }
+  });
+
+  console.log('[Columns] Auto-mapped fields:', JSON.stringify(result));
+  return result;
 }
 
 async function spDiscoverFields(){
@@ -977,6 +1050,11 @@ async function initSP(){
       return;
     }
     try{
+      /* Discover actual column internal names before fetching items */
+      var cols = await graphDiscoverListColumns();
+      var mappedFields = autoMapColumns(cols);
+      if(mappedFields) SP_CONFIG.fields = mappedFields;
+
       var items = await graphFetchAllItems();
       if(items.length > 0){
         var sampleKeys = Object.keys(items[0]).filter(function(k){ return !k.startsWith('@'); });
@@ -990,6 +1068,15 @@ async function initSP(){
       spRefreshIfLoggedIn();
       spSchedulePoll();
       spToast('\u2713 Connected to SharePoint \u2014 ' + items.length.toLocaleString() + ' records loaded', 5000);
+      /* Diagnostic: show mapped field names so mismatches are immediately visible */
+      var nm=document.getElementById('rlsName');
+      if(nm && isPrivileged(nm.textContent.trim())){
+        var fMap=SP_CONFIG.fields;
+        var missing=Object.keys(fMap).filter(function(k){return fMap[k]===SP_CONFIG.fields[k]&&items.length>0&&items[0][fMap[k]]===undefined;});
+        if(missing.length){
+          spToast('\u26A0 Unmapped fields: '+missing.join(', ')+' \u2014 check console (F12)',10000);
+        }
+      }
       return;
     }catch(e){
       console.warn('[Graph] Initial fetch failed:', e.message||e);
