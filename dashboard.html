@@ -895,10 +895,10 @@ function spTransform(items){
 
   /* pass 2 — build rows */
   items.forEach(function(it){
-    /* user — try configured field, then PseudoUserCode variants, then Title */
-    var uv=get(it,f.user)||get(it,'PseudoUserCode')||get(it,'Pseudo_x0020_User_x0020_Code')||it['Title']||'';
-    if(uv&&typeof uv==='object') uv=uv.Title||uv.LookupValue||uv.displayName||'';
-    uv=String(uv).trim(); if(!uv) return;
+    /* user — normalise whatever SP stores (email/name/code/claims) → canonical code */
+    var uvRaw=get(it,f.user)||get(it,'PseudoUserCode')||get(it,'Pseudo_x0020_User_x0020_Code')||it['Title']||'';
+    var uv=normalizeUser(uvRaw);
+    if(!uv) return;
     if(uMap[uv]===undefined){uMap[uv]=users.length;users.push(uv);}
     var ui=uMap[uv];
 
@@ -1940,8 +1940,75 @@ function isPrivileged(name){
   return /^(Manager|Supervisor)/i.test(name);
 }
 
+/* ── USER IDENTITY NORMALISATION ──────────────────────────────────────────
+   The SharePoint PseudoUserCode column may contain an email address, a
+   display name, an SAP claims token, or the canonical code ("Reviewer 0318").
+   USER_MAP resolves ALL known formats to the canonical Pseudo User Code so
+   the dashboard always shows the right user regardless of how data was entered.
+   ────────────────────────────────────────────────────────────────────────── */
+var USER_MAP = (function(){
+  var rows = [
+    /* email                              , displayName              , pseudoCode       */
+    ["dhana.lakshmi@sap.com"              ,"Dhana Lakshmi"           ,"Reviewer 0326"   ],
+    ["tanya.singh@sap.com"                ,"Tanya Singh"             ,"Reviewer 0318"   ],
+    ["niveditha.arivalagan@sap.com"       ,"Niveditha Arivalagan"    ,"Reviewer 0319"   ],
+    ["aftab.kaif@sap.com"                 ,"Aftab kaif"              ,"Reviewer 0320"   ],
+    ["ramya.d@sap.com"                    ,"Ramya D"                 ,"Reviewer 0321"   ],
+    ["vineetha.m@sap.com"                 ,"Vineetha M"              ,"Reviewer 0322"   ],
+    ["pavithra.vs@sap.com"                ,"Pavithra VS"             ,"Reviewer 0323"   ],
+    ["sanjay.s02@sap.com"                 ,"Sanjay S"                ,"Reviewer 0324"   ],
+    ["ayesha.tarannum@sap.com"            ,"Ayesha Tarannum"         ,"Reviewer 0325"   ],
+    ["rajkumar.m01@sap.com"               ,"Raj Kumar M"             ,"Supervisor 1207" ],
+    ["ranjan.preet.singh@sap.com"         ,"Ranjan Preet Singh"      ,"Manager 0030"    ],
+    ["thammaiah.a.p@sap.com"              ,"Thammaiah A P"           ,"Manager 0033"    ],
+    ["chandrakala.s02@sap.com"            ,"Chandrakala S"           ,"Support 0346"    ],
+    ["selphin.k.f@sap.com"                ,"Selphin KF"              ,"Manager 0034"    ],
+    ["manjula.kamath.r@sap.com"           ,"Manjula Kamath R"        ,"Manager 0053"    ]
+  ];
+  var m = {};
+  rows.forEach(function(r){
+    var email = r[0].toLowerCase(), name = r[1], code = r[2].trim();
+    var handle = email.split('@')[0];
+    m[email]   = code;   /* full email */
+    m[handle]  = code;   /* handle before @ */
+    m[name.toLowerCase()] = code;  /* display name (case-insensitive) */
+    m[code.toLowerCase()]= code;   /* canonical code → itself */
+    /* "Manager0030" style (no space) → canonical */
+    m[code.replace(/\s+/g,'').toLowerCase()] = code;
+  });
+  return m;
+})();
 
-/* ═══ PIN AUTHENTICATION — random PINs, not derivable from user codes ══════
+/* Resolve any user identifier → canonical Pseudo User Code.
+   Handles: canonical code, email, display name, SAP claims token, partial match. */
+function normalizeUser(raw){
+  if(!raw) return '';
+  /* Unwrap SharePoint person objects */
+  if(typeof raw==='object'){
+    raw = raw.LookupValue || raw.displayName || raw.Title || raw.Email || raw.email || '';
+  }
+  var s = String(raw).trim();
+  if(!s) return '';
+
+  /* 1. Direct lookup (case-insensitive) */
+  var lo = s.toLowerCase();
+  if(USER_MAP[lo]) return USER_MAP[lo];
+
+  /* 2. SAP claims token: "i:0#.f|membership|email@domain.com" */
+  var cm = s.match(/\|([^|]+@[^|]+)\s*$/);
+  if(cm){ var el=cm[1].trim().toLowerCase(); if(USER_MAP[el]) return USER_MAP[el]; }
+
+  /* 3. Strip "@..." suffix if full email with unusual domain */
+  if(s.indexOf('@')>-1){
+    var h=s.split('@')[0].toLowerCase();
+    if(USER_MAP[h]) return USER_MAP[h];
+  }
+
+  /* 4. Return as-is (preserves data for unknown users) */
+  return s;
+}
+
+
    Login is PIN-only. PINS_TO_USER maps each PIN to its owner's username.
    Wrong PIN → error. 3 failures → page-reload lockout.
    ═════════════════════════════════════════════════════════════════════════ */
