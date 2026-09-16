@@ -307,7 +307,7 @@ var MSAL_CFG={auth:{clientId:'b0e1ba73-7ff2-4c9f-91c4-eb2bf78adfe2',authority:'h
 var MSAL_SCOPES=['https://graph.microsoft.com/Sites.Read.All'];
 /* v22: key used to clear stale interaction lock left by cancelled popup/redirect */
 var MSAL_LOCK_KEY='msal.'+MSAL_CFG.auth.clientId+'.interaction.status';
-var SP_CONFIG={siteUrl:'https://sap.sharepoint.com/teams/BLRQualityReviewActivityMonitoringTool',listName:'BLR Quality Review Activity Monitoring Tool1',pageSize:2000,pollInterval:15000,fields:{user:'PseudoUserCode',startDate:'StartDate',endDate:'EndDate',timeMins:'TimeSpent',activity:'ActivityTask',client:'BatchReportIds',status:'Status'}};
+var SP_CONFIG={siteUrl:'https://sap.sharepoint.com/teams/BLRQualityReviewActivityMonitoringTool',listName:'BLR Quality Review Activity Monitoring Tool1',pageSize:2000,pollInterval:15000,fields:{user:'PseudoUserCode',startDate:'StartDateandTime',endDate:'EndDateandTime',timeMins:'TimeSpent',activity:'ActivityTask',client:'BatchReportIds',status:'Status'}};
 function isMsalConfigured(){return !!(MSAL_CFG.auth.clientId&&MSAL_CFG.auth.clientId!=='YOUR_CLIENT_ID');}
 
 var MONTHS=[],MR=[],AU=[],AA=[],FROWS_ALL=[],KROWS_ALL=[],FR=[],FROWS=[],KROWS=[];
@@ -460,7 +460,9 @@ function spTransform(items){
     return undefined;
   }
   var _mkFmt=new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Kolkata',year:'numeric',month:'2-digit'});
-  items.forEach(function(it){var sd=get(it,f.startDate)||it[f.startDate];if(!sd)return;var sdD=parseAsIST(sd);if(!sdD)return;var mkP={};_mkFmt.formatToParts(sdD).forEach(function(x){mkP[x.type]=x.value;});var mk=mkP.year+'-'+mkP.month;if(!mkSet[mk]){mkSet[mk]=1;mkArr.push(mk);}});
+  /* v28: comprehensive startDate fallback — covers StartDateandTime (confirmed internal name from Power BI),
+     StartDate (legacy default), x0020-encoded variants, and raw property access */
+  items.forEach(function(it){var sd=get(it,f.startDate)||get(it,'StartDateandTime')||get(it,'StartDate')||get(it,'Start_x0020_Date_x0020_and_x0020_Time')||get(it,'Start_x0020_Date_x0020_and_x0020_T')||get(it,'StartDateandTime_x0020_IST')||it[f.startDate];if(!sd)return;var sdD=parseAsIST(sd);if(!sdD)return;var mkP={};_mkFmt.formatToParts(sdD).forEach(function(x){mkP[x.type]=x.value;});var mk=mkP.year+'-'+mkP.month;if(!mkSet[mk]){mkSet[mk]=1;mkArr.push(mk);}});
   mkArr.sort();
   var mLabels=mkArr.map(function(mk){return new Date(mk+'-15T00:00:00+05:30').toLocaleString('en-GB',{timeZone:'Asia/Kolkata',month:'short',year:'numeric'});});
   var mIdx={};mkArr.forEach(function(mk,i){mIdx[mk]=i;});
@@ -471,8 +473,8 @@ function spTransform(items){
     if(uMap[uv]===undefined){uMap[uv]=users.length;users.push(uv);}var ui=uMap[uv];
     var av=String(get(it,f.activity)||get(it,'ActivityTask')||get(it,'Activity_x002F_Task')||get(it,'ActivityType')||get(it,'Activity_x0020_Type')||'Unknown').trim();
     if(aMap[av]===undefined){aMap[av]=acts.length;acts.push(av);}var ai=aMap[av];
-    var sd=get(it,f.startDate)||get(it,'StartDate')||get(it,'Start_x0020_Date_x0020_and_x0020_Time');
-    var ed=get(it,f.endDate)||get(it,'EndDate')||get(it,'End_x0020_Date_x0020_and_x0020_Time');
+    var sd=get(it,f.startDate)||get(it,'StartDateandTime')||get(it,'StartDate')||get(it,'Start_x0020_Date_x0020_and_x0020_Time')||get(it,'Start_x0020_Date_x0020_and_x0020_T');
+    var ed=get(it,f.endDate)||get(it,'EndDateandTime')||get(it,'EndDate')||get(it,'End_x0020_Date_x0020_and_x0020_Time')||get(it,'End_x0020_Date_x0020_and_x0020_Ti');
     var sdD=parseAsIST(sd),edD=parseAsIST(ed),sdS=fmtIST(sdD),edS=fmtIST(edD);
     var tm=parseInt(get(it,f.timeMins)||get(it,'TimeMins')||get(it,'TimeSpent')||get(it,'Time_x0020_Spent')||0)||0;
     var cl=String(get(it,f.client)||get(it,'BatchReportIds')||get(it,'Batch_x002F_Report_x0020_Ids')||'').trim();
@@ -482,14 +484,19 @@ function spTransform(items){
   });
   return {AU:users,AA:acts,MONTHS:mLabels,MR:mkArr,FROWS:fRows,KROWS:kRows};
 }
-/* v27: enhanced diagnostic — tallies raw values, shows post-normalisation mapping, posts visible toast */
+/* v28: enhanced diagnostic — tallies raw values, shows post-normalisation mapping, logs startDate resolution */
 function logTransformDiag(items){
   if(!items||!items.length)return;
   var f=SP_CONFIG.fields;
-  console.group('%c[BLR QRT] Transform diagnostics v27','background:#1A7840;color:#fff;padding:2px 6px');
+  console.group('%c[BLR QRT] Transform diagnostics v28','background:#1A7840;color:#fff;padding:2px 6px');
   var allKeys=Object.keys(items[0]).filter(function(k){return !k.startsWith('@');});
   console.log('All field keys (first item):',allKeys.join(', '));
   console.log('SP_CONFIG.fields (auto-mapped):',JSON.stringify(f));
+  /* v28: log startDate field resolution to pinpoint the correct internal name */
+  var sdCandidates=[f.startDate,'StartDateandTime','StartDate','Start_x0020_Date_x0020_and_x0020_Time','Start_x0020_Date_x0020_and_x0020_T'];
+  var sdHit='(none)';
+  if(items[0]){for(var si=0;si<sdCandidates.length;si++){var c=sdCandidates[si];if(items[0][c]!==undefined&&items[0][c]!==null&&items[0][c]!==''){sdHit=c+' = "'+String(items[0][c]).slice(0,40)+'"';break;}}}
+  console.log('%c[v28] startDate field resolution: '+sdHit,'color:#FF8000;font-weight:bold');
   /* tally every unique raw value in the user-identity chain */
   var rawCounts={};
   items.forEach(function(it){
@@ -514,7 +521,7 @@ function logTransformDiag(items){
   if(emptyCount){console.warn('Records with empty user field: '+emptyCount+' (will use createdBy fallback)');}
   /* visible toast */
   var unresTxt=unresolved.length?' | '+unresolved.length+' UNRESOLVED (see console)':'';
-  spToast('[v27 Diag] '+items.length+' SP records | userField="'+f.user+'" | '+entries.length+' raw values | '+resolved+' resolved'+unresTxt+'. F12 Console for details.',14000);
+  spToast('[v28 Diag] '+items.length+' SP records | startDate field: '+sdHit.split(' = ')[0]+' | '+entries.length+' raw users | '+resolved+' resolved'+unresTxt+'. F12 Console for details.',16000);
   console.groupEnd();
 }
 function rebuildDropdowns(){
