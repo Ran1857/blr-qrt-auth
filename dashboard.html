@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>BLR Quality Review — Activity Monitoring Dashboard</title>
-<script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"></script>
+<script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.3/lib/msal-browser.min.js'"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:"72 Brand",Arial,sans-serif;background:#F5F6F8;color:#32363A;font-size:14px}
@@ -120,15 +120,21 @@ tr:hover td{background:#F8F9FB}tr:last-child td{border-bottom:none}
 #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#00144A;color:#fff;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:600;z-index:2000;opacity:0;transition:opacity .3s;pointer-events:none;max-width:80vw;text-align:center}
 #toast.show{opacity:1}
 @media(max-width:700px){.charts{grid-template-columns:1fr}.chart.full{grid-column:auto}.kpis{grid-template-columns:repeat(2,1fr)}.hdr{padding:0 12px;gap:8px}.hTitle h1{font-size:13px}.tabPane{padding:14px 12px}.filterBar{padding:10px 12px}}
+/* SAP Concur logo wrapper */
+.hLogoWrap{display:flex;align-items:center;gap:0;flex-shrink:0}
+.hLogoConcur{font-size:14px;font-weight:700;color:#fff;letter-spacing:-.2px;margin-left:9px;padding-left:9px;border-left:1.5px solid rgba(255,255,255,.32)}
+/* Login card SAP Concur mark */
+.lcBrand{display:flex;align-items:center;gap:0;margin-bottom:20px}
+.lcConcur{font-size:14px;font-weight:700;color:#00144A;letter-spacing:-.2px;margin-left:9px;padding-left:9px;border-left:1.5px solid #D5D6D7}
 </style>
 </head>
 <body>
 
 <div id="loginOverlay">
   <div class="loginCard">
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px">
-      <svg viewBox="0 0 62 25" height="26"><path d="M0 0h10.3v25H0z" fill="#00144A"/><path d="M12.8 0h10.3v25H12.8z" fill="#0070F2"/><path d="M25.6 0H36v25H25.6z" fill="#00144A"/><path d="M38.5 0h23.4v12.5H38.5z" fill="#0070F2"/><path d="M38.5 12.5h23.4V25H38.5z" fill="#00144A"/></svg>
-      <span style="font-size:13px;font-weight:700;color:#00144A">SAP Concur</span>
+    <div class="lcBrand">
+      <svg viewBox="0 0 62 25" height="26" style="flex-shrink:0"><path d="M0 0h10.3v25H0z" fill="#00144A"/><path d="M12.8 0h10.3v25H12.8z" fill="#0070F2"/><path d="M25.6 0H36v25H25.6z" fill="#00144A"/><path d="M38.5 0h23.4v12.5H38.5z" fill="#0070F2"/><path d="M38.5 12.5h23.4V25H38.5z" fill="#00144A"/></svg>
+      <span class="lcConcur">Concur</span>
     </div>
     <div class="loginTitle">BLR QRT Dashboard</div>
     <div class="loginSub">Enter your PIN to access the dashboard</div>
@@ -139,7 +145,10 @@ tr:hover td{background:#F8F9FB}tr:last-child td{border-bottom:none}
   </div>
 </div>
 <header class="hdr">
-  <svg class="hLogo" viewBox="0 0 62 25"><path d="M0 0h10.3v25H0z" fill="#fff"/><path d="M12.8 0h10.3v25H12.8z" fill="#4CB1FF"/><path d="M25.6 0H36v25H25.6z" fill="#fff"/><path d="M38.5 0h23.4v12.5H38.5z" fill="#4CB1FF"/><path d="M38.5 12.5h23.4V25H38.5z" fill="#fff"/></svg>
+  <div class="hLogoWrap">
+    <svg viewBox="0 0 62 25" height="26" style="flex-shrink:0"><path d="M0 0h10.3v25H0z" fill="#fff"/><path d="M12.8 0h10.3v25H12.8z" fill="#4CB1FF"/><path d="M25.6 0H36v25H25.6z" fill="#fff"/><path d="M38.5 0h23.4v12.5H38.5z" fill="#4CB1FF"/><path d="M38.5 12.5h23.4V25H38.5z" fill="#fff"/></svg>
+    <span class="hLogoConcur">Concur</span>
+  </div>
   <div class="hTitle"><h1>BLR QRT Activity Monitoring Dashboard</h1><p>BLR QRT Activity Monitoring Dashboard &bull; <span id="hdrCount">&#8212;</span> Records</p></div>
   <div class="hr2">
     <span class="ts">Last Updated: <span style="font-weight:600" id="tsLbl">&#8212;</span></span>
@@ -215,7 +224,9 @@ tr:hover td{background:#F8F9FB}tr:last-child td{border-bottom:none}
    v21: Switch from acquireTokenPopup to loginRedirect — fixes popup-blocked sign-in.
         redirectUri now points at dashboard.html directly. No popup used anywhere.
    v22: Clear MSAL interaction_in_progress lock (stale from old popup attempts) before
-        every loginRedirect call. Show real MSAL errorCode in toast if redirect still fails. */
+        every loginRedirect call. Show real MSAL errorCode in toast if redirect still fails.
+   v23: CDN fallback (jsdelivr onerror) if alcdn.msauth.net is blocked. Wait-loop in
+        msalInit for fallback CDN load. Null guard in msalLogin. SAP Concur branding. */
 
 var MSAL_CFG={auth:{clientId:'b0e1ba73-7ff2-4c9f-91c4-eb2bf78adfe2',authority:'https://login.microsoftonline.com/42f7676c-f455-423c-82f6-dc2d99791af7',redirectUri:'https://ran1857.github.io/blr-qrt-auth/dashboard.html'},cache:{cacheLocation:'sessionStorage',storeAuthStateInCookie:false}};
 var MSAL_SCOPES=['https://graph.microsoft.com/Sites.Read.All'];
@@ -231,6 +242,9 @@ var _RLS_IDX=-1,_PIN_ATTEMPTS=0,cP=1,PAGE_SIZE=50,_D={};
 var CLRS=['#0070F2','#F0AB00','#1A7840','#00144A','#6A5ACD','#E44D26','#00A9CE','#F56C2D','#8B5CF6','#059669'];
 
 async function msalInit(){
+  /* v23: wait up to 2s for MSAL library — the onerror fallback CDN may load slightly after inline scripts */
+  for(var _w=0;_w<8&&typeof msal==='undefined';_w++)await new Promise(function(r){setTimeout(r,250);});
+  if(typeof msal==='undefined'){console.error('[MSAL] Library unavailable from all CDNs');return false;}
   try{
     _msal=new msal.PublicClientApplication(MSAL_CFG);await _msal.initialize();
     /* v21: capture redirect result — fires when returning from loginRedirect */
@@ -248,6 +262,8 @@ async function msalInit(){
 }
 /* v21: redirect-based sign-in — no popup, works in all corporate browsers */
 async function msalLogin(){
+  /* v23: guard — if MSAL library failed to load, _msal will be null */
+  if(!_msal){spToast('\u26A0 MSAL library not loaded \u2014 please refresh the page (F5).',9000);console.error('[MSAL] _msal is null');return false;}
   /* v22: force-clear the interaction lock so a stale popup/redirect lock never blocks us */
   sessionStorage.removeItem(MSAL_LOCK_KEY);
   try{await _msal.loginRedirect({scopes:MSAL_SCOPES});/* browser navigates away — nothing below runs */}
