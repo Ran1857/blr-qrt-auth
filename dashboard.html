@@ -213,10 +213,14 @@ tr:hover td{background:#F8F9FB}tr:last-child td{border-bottom:none}
 /* BLR QRT Activity Monitoring Dashboard v20
    Fixes: get() encoding bug, AU defensive guard, tryRestoreSession after live load
    v21: Switch from acquireTokenPopup to loginRedirect — fixes popup-blocked sign-in.
-        redirectUri now points at dashboard.html directly. No popup used anywhere. */
+        redirectUri now points at dashboard.html directly. No popup used anywhere.
+   v22: Clear MSAL interaction_in_progress lock (stale from old popup attempts) before
+        every loginRedirect call. Show real MSAL errorCode in toast if redirect still fails. */
 
 var MSAL_CFG={auth:{clientId:'b0e1ba73-7ff2-4c9f-91c4-eb2bf78adfe2',authority:'https://login.microsoftonline.com/42f7676c-f455-423c-82f6-dc2d99791af7',redirectUri:'https://ran1857.github.io/blr-qrt-auth/dashboard.html'},cache:{cacheLocation:'sessionStorage',storeAuthStateInCookie:false}};
 var MSAL_SCOPES=['https://graph.microsoft.com/Sites.Read.All'];
+/* v22: key used to clear stale interaction lock left by cancelled popup/redirect */
+var MSAL_LOCK_KEY='msal.'+MSAL_CFG.auth.clientId+'.interaction.status';
 var SP_CONFIG={siteUrl:'https://sap.sharepoint.com/teams/BLRQualityReviewActivityMonitoringTool',listName:'BLR Quality Review Activity Monitoring Tool1',pageSize:2000,pollInterval:15000,fields:{user:'PseudoUserCode',startDate:'StartDate',endDate:'EndDate',timeMins:'TimeSpent',activity:'ActivityTask',client:'BatchReportIds',status:'Status'}};
 function isMsalConfigured(){return !!(MSAL_CFG.auth.clientId&&MSAL_CFG.auth.clientId!=='YOUR_CLIENT_ID');}
 
@@ -229,8 +233,10 @@ var CLRS=['#0070F2','#F0AB00','#1A7840','#00144A','#6A5ACD','#E44D26','#00A9CE',
 async function msalInit(){
   try{
     _msal=new msal.PublicClientApplication(MSAL_CFG);await _msal.initialize();
-    /* v21: capture redirect result — this fires when we return from loginRedirect */
+    /* v21: capture redirect result — fires when returning from loginRedirect */
     var rr=await _msal.handleRedirectPromise();
+    /* v22: clear any stale interaction lock left by a cancelled popup or redirect */
+    sessionStorage.removeItem(MSAL_LOCK_KEY);
     if(rr){_msalAccount=rr.account;_graphToken=rr.accessToken;
       console.log('[MSAL] Redirect auth completed:',_msalAccount.username);return true;}
     var a=_msal.getAllAccounts();if(a.length>0){_msalAccount=a[0];
@@ -242,8 +248,15 @@ async function msalInit(){
 }
 /* v21: redirect-based sign-in — no popup, works in all corporate browsers */
 async function msalLogin(){
-  try{await _msal.loginRedirect({scopes:MSAL_SCOPES});/* browser navigates away */}
-  catch(e){console.warn('[MSAL] loginRedirect failed:',e.message);return false;}
+  /* v22: force-clear the interaction lock so a stale popup/redirect lock never blocks us */
+  sessionStorage.removeItem(MSAL_LOCK_KEY);
+  try{await _msal.loginRedirect({scopes:MSAL_SCOPES});/* browser navigates away — nothing below runs */}
+  catch(e){
+    var ec=e.errorCode||e.name||'unknown';
+    console.error('[MSAL] loginRedirect threw ['+ec+']:',e.message,e);
+    spToast('\u26A0 Sign-in error ['+ec+']: '+String(e.message||e).slice(0,80),9000);
+    return false;
+  }
 }
 async function msalGetToken(){
   if(!_msal||!_msalAccount)return null;
@@ -261,13 +274,12 @@ function showMsalSignInBtn(){
   btn.onclick=async function(){
     btn.disabled=true;btn.innerHTML=msIco+'Redirecting to Microsoft\u2026';
     spSetBadge('connecting');spToast('Redirecting to Microsoft sign-in\u2026',3000);
-    /* v21: loginRedirect — no popup, browser navigates to MS login then returns */
+    /* v22: msalLogin clears stale lock then calls loginRedirect; error shown inside msalLogin */
     var failed=await msalLogin();
-    /* only reaches here if loginRedirect itself threw */
+    /* only reaches here if loginRedirect itself threw — toast already shown by msalLogin */
     if(failed===false){
       btn.disabled=false;btn.innerHTML=msIco+'Sign in for live data';
-      spSetBadge(FROWS_ALL.length>0?'cached':'offline');
-      spToast('\u26A0 Could not start sign-in. Check the Azure redirect URI.',7000);}
+      spSetBadge(FROWS_ALL.length>0?'cached':'offline');}
   };
   var eb=hdr.querySelector('.bexp');hdr.insertBefore(btn,eb||null);
 }
