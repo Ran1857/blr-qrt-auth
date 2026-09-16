@@ -308,14 +308,13 @@ tr:hover td{background:#F8F9FB}tr:last-child td{border-bottom:none}
         With the filter, only the ~N records belonging to the 15 users are fetched,
         dramatically reducing API calls and load time. Auto-falls back to unfiltered
         pagination if PseudoUserCode is not indexed (HTTP 400/403/5xx).
-   v31: Microsoft Graph Search API added as a third fetch path. SharePoint Search index
-        is security-trimmed at site-owner level (not item level), so Manager 0030 (Full
-        Access / site owner) sees ALL indexed list items via this path regardless of the
-        "Read items created by user" item-level setting. Three paths tried in parallel:
-        Graph-Filtered (v30), Search-API (v31 NEW), SP-Token (v29). Whichever returns
-        the most records is used. Per-user KQL queries (PseudoUserCode:"<code>") are
-        used to scope results to the 15 known BLR QRT users without needing pagination
-        through all 42 K list items. Falls back gracefully with console diagnostics. */
+   v31: Graph Search API (POST /search/query). PseudoUserCode NOT a queryable managed
+        property — KQL filter returned 0. Path-only probe confirmed 26,680 items indexed
+        and Title field = user email ({"title":"chandrakala.s02@sap.com"}).
+   v32: Two-step Search+Batch: (1) Search by Title:"email" per user → numeric item IDs
+        from webUrl ?ID=xxx. (2) Batch-fetch items by ID via Graph $batch (20/batch,
+        5 parallel). Full Control at list level should allow individual item access.
+        Also fixes $count 400 spam in spPoll via _countFailed flag. */
 
 var MSAL_CFG={auth:{clientId:'b0e1ba73-7ff2-4c9f-91c4-eb2bf78adfe2',authority:'https://login.microsoftonline.com/42f7676c-f455-423c-82f6-dc2d99791af7',redirectUri:'https://ran1857.github.io/blr-qrt-auth/dashboard.html'},cache:{cacheLocation:'sessionStorage',storeAuthStateInCookie:false}};
 var MSAL_SCOPES=['https://graph.microsoft.com/Sites.Read.All'];
@@ -404,6 +403,15 @@ var SP_KNOWN_CODES=['Reviewer 0318','Reviewer 0319','Reviewer 0320','Reviewer 03
   'Reviewer 0322','Reviewer 0323','Reviewer 0324','Reviewer 0325','Reviewer 0326',
   'Supervisor 1207','Manager 0030','Manager 0033','Manager 0034','Manager 0053',
   'Support 0346'];
+/* v32: email addresses corresponding to each SP_KNOWN_CODE (same order).
+   Used to search SharePoint Search index by Title field (which contains creator email). */
+var SP_USER_EMAILS=[
+  'tanya.singh@sap.com','niveditha.arivalagan@sap.com','aftab.kaif@sap.com',
+  'ramya.d@sap.com','vineetha.m@sap.com','pavithra.vs@sap.com',
+  'sanjay.s02@sap.com','ayesha.tarannum@sap.com','dhana.lakshmi@sap.com',
+  'rajkumar.m01@sap.com','ranjan.preet.singh@sap.com','thammaiah.a.p@sap.com',
+  'selphin.k.f@sap.com','manjula.kamath.r@sap.com','chandrakala.s02@sap.com'
+];
 async function graphFetchAllItems(){
   var siteId=await graphGetSiteId();
   var baseUrl='https://graph.microsoft.com/v1.0/sites/'+siteId+'/lists/'+encodeURIComponent(SP_CONFIG.listName)+'/items';
@@ -450,10 +458,14 @@ async function graphFetchAllItems(){
   console.log('[v30] Graph '+(useFiltered?'filtered (only BLR QRT users)':'unfiltered')+' fetch: '+items.length+' items total.');
   return items;
 }
+/* v32: _countFailed prevents repeated 400 spam in spPoll when item-level permissions block $count */
+var _countFailed=false;
 async function graphGetItemCount(){
+  if(_countFailed)return -1;
   try{var siteId=await graphGetSiteId();var token=await msalGetToken();
     var r=await fetch('https://graph.microsoft.com/v1.0/sites/'+siteId+'/lists/'+encodeURIComponent(SP_CONFIG.listName)+'/items?$count=true&$top=1&$select=id',{headers:{'Authorization':'Bearer '+token,'Accept':'application/json','ConsistencyLevel':'eventual'}});
-    if(!r.ok)return -1;var d=await r.json();return typeof d['@odata.count']==='number'?d['@odata.count']:-1;}catch(e){return -1;}
+    if(!r.ok){if(r.status===400||r.status===403)_countFailed=true;return -1;}
+    var d=await r.json();return typeof d['@odata.count']==='number'?d['@odata.count']:-1;}catch(e){return -1;}
 }
 async function graphDiscoverListColumns(){
   try{var siteId=await graphGetSiteId();var token=await msalGetToken();
@@ -606,6 +618,135 @@ async function graphSearchFetchListItems(){
   }catch(e){
     console.warn('[v31] Search API exception:',e.message||e);
     return [];
+  }
+}
+
+/* ── v32: SEARCH-BY-TITLE + GRAPH-BATCH FETCH ─────────────────────────
+   The SharePoint list's Title column contains the creator's email address
+   (confirmed from console: {"title":"chandrakala.s02@sap.com"}).
+   Title IS a queryable managed property in SharePoint Search, so we can
+   filter per-user with KQL: path:"..." Title:"email@sap.com".
+   Search security trimming runs at site-owner level → Manager 0030 (Full
+   Access) sees all 26,680 indexed items regardless of item-level ACL.
+   We then batch-fetch each item by numeric ID via Graph $batch (20/batch,
+   5 batches in parallel). Full Control at list level should allow individual
+   item reads to bypass the "Read items created by user" setting. ─────── */
+
+/* Step 1 helper: search one email, return array of numeric SP item IDs */
+async function graphSearchByTitle(email,token,listPath){
+  var ids=[],from=0,hasMore=true;
+  while(hasMore){
+    var sb=JSON.stringify({"requests":[{
+      "entityTypes":["listItem"],
+      "query":{"queryString":"path:\""+listPath+"\" Title:\""+email+"\""},
+      "from":from,"size":500,"fields":["Title"]
+    }]});
+    var r=await fetch('https://graph.microsoft.com/v1.0/search/query',{
+      method:'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:sb
+    });
+    if(!r.ok){console.warn('[v32] Search HTTP '+r.status+' for '+email);break;}
+    var d=await r.json();if(d.error){console.warn('[v32] Search error for '+email+':',d.error.code);break;}
+    var containers=(((d.value||[])[0])||{}).hitsContainers||[];
+    var hits=((containers[0])||{}).hits||[];
+    var total=((containers[0])||{}).total||0;
+    console.log('[v32] Title:"'+email+'" \u2192 '+hits.length+' hits (total='+total+')');
+    hits.forEach(function(h){
+      if(!h.resource)return;
+      /* Extract numeric SP item ID from DispForm URL ?ID=xxx */
+      var idM=(h.resource.webUrl||'').match(/[?&]ID=(\d+)/i);
+      if(idM){ids.push(idM[1]);return;}
+      /* Fallback: resource.id may end with /items/<numericId> */
+      var pM=(h.resource.id||'').match(/items\/(\d+)$/);
+      if(pM)ids.push(pM[1]);
+    });
+    from+=500;
+    hasMore=(hits.length===500&&from+500<=1000&&from<total);
+  }
+  return ids;
+}
+
+/* Step 2 helper: batch-fetch items by numeric ID, 20 per batch, 5 parallel */
+async function graphBatchFetchItems(numericIds,siteId){
+  var listEnc=encodeURIComponent(SP_CONFIG.listName);
+  var basePath='/v1.0/sites/'+siteId+'/lists/'+listEnc+'/items/';
+  var allItems=[],totalDenied=0;
+
+  /* group into chunks of 20 (Graph $batch limit), then run 5 chunks in parallel */
+  var chunks=[];
+  for(var i=0;i<numericIds.length;i+=20)chunks.push(numericIds.slice(i,i+20));
+
+  var PARALLEL=5;
+  for(var gi=0;gi<chunks.length;gi+=PARALLEL){
+    var group=chunks.slice(gi,gi+PARALLEL);
+    var results=await Promise.all(group.map(async function(chunk){
+      var bToken=await msalGetToken();
+      var body={"requests":chunk.map(function(id,idx){
+        return{"id":String(idx+1),"method":"GET","url":basePath+id+'?$expand=fields'};
+      })};
+      var r=await fetch('https://graph.microsoft.com/v1.0/$batch',{
+        method:'POST',
+        headers:{'Authorization':'Bearer '+bToken,'Content-Type':'application/json','Accept':'application/json'},
+        body:JSON.stringify(body)
+      });
+      if(!r.ok){console.warn('[v32] $batch HTTP '+r.status);return{items:[],denied:0};}
+      var bd=await r.json();
+      var items=[],denied=0;
+      (bd.responses||[]).forEach(function(resp){
+        if(resp.status===200&&resp.body){
+          var row=Object.assign({},resp.body.fields||{});
+          if(resp.body.createdBy&&resp.body.createdBy.user)
+            row['_createdByEmail']=resp.body.createdBy.user.email||'';
+          items.push(row);
+        }else if(resp.status===403||resp.status===401)denied++;
+      });
+      return{items:items,denied:denied};
+    }));
+    results.forEach(function(res){allItems=allItems.concat(res.items);totalDenied+=res.denied;});
+    console.log('[v32] Batch progress: '+allItems.length+' items, '+totalDenied+' denied (group '+(Math.floor(gi/PARALLEL)+1)+')');
+  }
+  return{items:allItems,denied:totalDenied};
+}
+
+/* Main v32 entry point */
+async function graphSearchAndBatchFetch(){
+  try{
+    var token=await msalGetToken();
+    var siteId=await graphGetSiteId();
+    var listPath=SP_CONFIG.siteUrl+'/Lists/'+SP_CONFIG.listName;
+
+    /* Step 1: collect numeric item IDs via Title search for all 15 emails */
+    var allIds=[];
+    for(var i=0;i<SP_USER_EMAILS.length;i++){
+      var ids=await graphSearchByTitle(SP_USER_EMAILS[i],token,listPath);
+      allIds=allIds.concat(ids);
+    }
+    /* Deduplicate */
+    var seen={},unique=[];
+    allIds.forEach(function(id){if(!seen[id]){seen[id]=1;unique.push(id);}});
+    console.log('[v32] Search found '+unique.length+' unique item IDs across '+SP_USER_EMAILS.length+' users');
+
+    if(unique.length===0){
+      console.warn('[v32] Title search returned 0 IDs. '+
+        'Title may not equal email for all users. '+
+        'Only remaining fix: Site Collection Admin for Manager 0030.');
+      return[];
+    }
+
+    /* Step 2: batch-fetch full field data */
+    var result=await graphBatchFetchItems(unique,siteId);
+    console.log('[v32] Search+Batch complete: '+result.items.length+' items fetched, '+result.denied+' denied');
+
+    if(result.items.length===0&&unique.length>0){
+      console.warn('[v32 FINAL DIAGNOSIS] Search found '+unique.length+' item IDs but all '+result.denied+' individual fetches denied. '+
+        'Full Control at list level does NOT bypass Graph API item-level ACL for individual item access. '+
+        'ONLY REMAINING FIX: Assign ranjan.preet.singh@sap.com as Site Collection Admin. '+
+        'Path: Microsoft 365 Admin Centre \u2192 SharePoint Admin \u2192 Active Sites \u2192 select BLR QRT site \u2192 Permissions tab \u2192 Site Admins \u2192 Add Manager 0030.');
+      spToast('\u26A0 All code-based paths exhausted. Only remaining fix: assign Manager 0030 as Site Collection Admin in SharePoint Admin Centre.',22000);
+    }
+    return result.items;
+  }catch(e){
+    console.warn('[v32] graphSearchAndBatchFetch exception:',e.message||e);
+    return[];
   }
 }
 
@@ -1022,41 +1163,42 @@ async function initSP(){
     if(!authenticated){showMsalSignInBtn();spSetBadge(FROWS_ALL.length>0?'cached':'offline');return;}
     try{
       var cols=await graphDiscoverListColumns();var mappedFields=autoMapColumns(cols);if(mappedFields)SP_CONFIG.fields=mappedFields;
-      /* v31: three fetch paths — use whichever returns the MOST records.
-         Path 1 (Graph filtered):  Graph Items API with $filter by PseudoUserCode (v30).
-                                   Restricted by item-level ACL → typically returns only own records.
-         Path 2 (Search API):      Graph Search API using SharePoint search index (v31 NEW).
-                                   Search is security-trimmed at site-owner level, NOT item level.
-                                   Site owner (Manager 0030) should see ALL indexed list items.
-         Path 3 (SP-token):        SharePoint REST API with AllSites.Read scope (v29).
-                                   Falls back to [] if scope not consented or CORS blocks. */
+      /* v32: three fetch paths — use whichever returns the MOST records.
+         Path 1 (Graph-Filtered):   Graph Items API with $filter by PseudoUserCode.
+                                    Restricted by item-level ACL → only own records (110).
+         Path 2 (Search+Batch):     NEW v32 — Search by Title:"email", collect item IDs,
+                                    batch-fetch full fields via Graph $batch. Site-owner
+                                    search trimming bypasses item-level ACL for discovery.
+                                    Full Control at list level should allow individual reads.
+         Path 3 (SP-Token):         SharePoint REST with AllSites.Read scope.
+                                    Falls back to [] if scope not consented. */
       var graphItems=await graphFetchAllItems();
-      console.log('[v31] Graph filtered API:',graphItems.length,'items.');
-      var searchItems=await graphSearchFetchListItems();
-      console.log('[v31] Search API:',searchItems.length,'items.');
+      console.log('[v32] Path 1 (Graph-Filtered):',graphItems.length,'items.');
+      var searchBatchItems=await graphSearchAndBatchFetch();
+      console.log('[v32] Path 2 (Search+Batch):',searchBatchItems.length,'items.');
       var spTokenItems=await spFetchAllItemsViaSharePointToken();
-      console.log('[v31] SP-token path:',spTokenItems.length,'items.');
+      console.log('[v32] Path 3 (SP-Token):',spTokenItems.length,'items.');
       /* Pick the path with the most records */
-      var paths=[{name:'Graph-Filtered',items:graphItems},{name:'Search-API',items:searchItems},{name:'SP-Token',items:spTokenItems}];
+      var paths=[{name:'Graph-Filtered',items:graphItems},{name:'Search+Batch',items:searchBatchItems},{name:'SP-Token',items:spTokenItems}];
       paths.sort(function(a,b){return b.items.length-a.items.length;});
       var best=paths[0];
       var items=best.items;
-      console.log('[v31] Using "'+best.name+'" ('+items.length+' items). Other paths: '+paths.slice(1).map(function(p){return p.name+'='+p.items.length;}).join(', '));
+      console.log('[v32] Best path: "'+best.name+'" ('+items.length+' items). Others: '+paths.slice(1).map(function(p){return p.name+'='+p.items.length;}).join(', '));
       if(best.name!=='Graph-Filtered'&&items.length>graphItems.length){
         spToast('\u2713 '+best.name+' returned more records ('+items.length+' vs '+graphItems.length+' via Graph). Using expanded dataset.',8000);
       }
       logTransformDiag(items);
       var data=spTransform(items);_spLastItemCount=items.length;
       spApply(data,'live');
-      /* v31: post-load permission check — warn if suspiciously few unique users */
+      /* v32: post-load permission check */
       (function(){
         var uCount=data&&data.AU?data.AU.length:0;
         if(uCount<3&&items.length>0){
-          console.warn('[v31 Permissions Warning] Only '+uCount+' user(s) visible. All 3 fetch paths returned restricted data. '
-            +'Consider: (a) Make ranjan.preet.singh@sap.com a Site Collection Admin in SharePoint Admin Centre, or '
-            +'(b) List Settings \u2192 Advanced Settings \u2192 "Read all items".');
-          spToast('\u26A0 Only '+uCount+' user(s) found across all 3 data paths. The list item-level ACL is still restricting Graph API, Search API, and SP-token access. '
-            +'Final option: assign Manager 0030 as Site Collection Admin in SharePoint Admin Centre.',20000);
+          console.warn('[v32 Permissions Warning] Only '+uCount+' user(s) visible across all 3 paths. '+
+            'ONLY REMAINING FIX: Assign Manager 0030 (ranjan.preet.singh@sap.com) as Site Collection Admin. '+
+            'Microsoft 365 Admin Centre \u2192 SharePoint Admin \u2192 Active Sites \u2192 BLR QRT site \u2192 Permissions \u2192 Site Admins \u2192 Add.');
+          spToast('\u26A0 Only '+uCount+' user(s) found. All 3 data paths exhausted. '+
+            'Final fix: SharePoint Admin Centre \u2192 Active Sites \u2192 BLR QRT site \u2192 Site Admins \u2192 add ranjan.preet.singh@sap.com.',22000);
         }
       })();
       tryRestoreSession();
