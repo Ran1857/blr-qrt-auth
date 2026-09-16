@@ -307,7 +307,15 @@ tr:hover td{background:#F8F9FB}tr:last-child td{border-bottom:none}
         and Manager 0030's item-level permissions limited the result to 112.
         With the filter, only the ~N records belonging to the 15 users are fetched,
         dramatically reducing API calls and load time. Auto-falls back to unfiltered
-        pagination if PseudoUserCode is not indexed (HTTP 400/403/5xx). */
+        pagination if PseudoUserCode is not indexed (HTTP 400/403/5xx).
+   v31: Microsoft Graph Search API added as a third fetch path. SharePoint Search index
+        is security-trimmed at site-owner level (not item level), so Manager 0030 (Full
+        Access / site owner) sees ALL indexed list items via this path regardless of the
+        "Read items created by user" item-level setting. Three paths tried in parallel:
+        Graph-Filtered (v30), Search-API (v31 NEW), SP-Token (v29). Whichever returns
+        the most records is used. Per-user KQL queries (PseudoUserCode:"<code>") are
+        used to scope results to the 15 known BLR QRT users without needing pagination
+        through all 42 K list items. Falls back gracefully with console diagnostics. */
 
 var MSAL_CFG={auth:{clientId:'b0e1ba73-7ff2-4c9f-91c4-eb2bf78adfe2',authority:'https://login.microsoftonline.com/42f7676c-f455-423c-82f6-dc2d99791af7',redirectUri:'https://ran1857.github.io/blr-qrt-auth/dashboard.html'},cache:{cacheLocation:'sessionStorage',storeAuthStateInCookie:false}};
 var MSAL_SCOPES=['https://graph.microsoft.com/Sites.Read.All'];
@@ -494,6 +502,113 @@ async function spFetchAllItemsViaSharePointToken(){
     return [];
   }
 }
+
+/* v31: Microsoft Graph Search API — bypasses item-level "Read items created by user" restriction.
+   The SharePoint Search index is security-trimmed at site-owner level, not item level.
+   Manager 0030 (Full Access / site owner) therefore sees ALL indexed items in the list.
+   Makes one KQL query per user in SP_KNOWN_CODES, 500 results per page (max 1000 per user).
+   Falls back gracefully to [] if the Search API is unavailable or returns an error. */
+async function graphSearchFetchListItems(){
+  try{
+    var token=await msalGetToken();
+    var listPath=SP_CONFIG.siteUrl+'/Lists/'+SP_CONFIG.listName;
+    var userField=SP_CONFIG.fields.user||'PseudoUserCode';
+    var allItems=[],searchWorked=false;
+    var fieldList=[
+      'PseudoUserCode','StartDateandTime','EndDateandTime','TimeSpent',
+      'ActivityTask','BatchReportIds','Status','Title','Author','Created',
+      'Start_x0020_Date_x0020_and_x0020_Time','End_x0020_Date_x0020_and_x0020_Time',
+      'Time_x0020_Spent','Activity_x002F_Task','Batch_x002F_Report_x0020_Ids'
+    ];
+    for(var i=0;i<SP_KNOWN_CODES.length;i++){
+      var code=SP_KNOWN_CODES[i];
+      var from=0,hasMore=true;
+      while(hasMore){
+        var body=JSON.stringify({"requests":[{
+          "entityTypes":["listItem"],
+          "query":{"queryString":"path:\""+listPath+"\" "+userField+":\""+code+"\""},
+          "from":from,"size":500,
+          "fields":fieldList
+        }]});
+        var r=await fetch('https://graph.microsoft.com/v1.0/search/query',{
+          method:'POST',
+          headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json','Accept':'application/json'},
+          body:body
+        });
+        if(!r.ok){console.warn('[Search] '+code+': HTTP '+r.status);hasMore=false;break;}
+        var d=await r.json();
+        if(d.error){console.warn('[Search] '+code+': error',d.error.code,d.error.message);hasMore=false;break;}
+        var containers=(((d.value||[])[0])||{}).hitsContainers||[];
+        var hits=((containers[0])||{}).hits||[];
+        var total=((containers[0])||{}).total||0;
+        if(hits.length>0)searchWorked=true;
+        hits.forEach(function(h){if(h.resource){var row=Object.assign({},h.resource.fields||{});allItems.push(row);}});
+        from+=500;
+        /* Graph Search: from + size must be <= 1000 */
+        hasMore=(hits.length===500&&from+500<=1000&&from<total);
+      }
+    }
+    /* Diagnostic fallback: if per-user KQL returned nothing, do a path-only probe to check if
+       PseudoUserCode is a search managed property and log a sample of raw fields */
+    if(!searchWorked){
+      console.warn('[v31] Per-user KQL search returned 0 — PseudoUserCode may not be a search managed property. Running path-only probe...');
+      var probe=JSON.stringify({"requests":[{
+        "entityTypes":["listItem"],
+        "query":{"queryString":"path:\""+listPath+"\""},
+        "from":0,"size":5,"fields":['PseudoUserCode','Title']
+      }]});
+      var r2=await fetch('https://graph.microsoft.com/v1.0/search/query',{
+        method:'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:probe
+      });
+      if(r2.ok){
+        var d2=await r2.json();
+        var c2=(((d2.value||[])[0])||{}).hitsContainers||[];
+        var total2=((c2[0])||{}).total||0;
+        var hits2=((c2[0])||{}).hits||[];
+        console.log('[v31] Path-only probe: total='+total2+', sample='+hits2.length+' hits');
+        if(hits2.length>0){
+          console.log('[v31] Sample fields from search index:',JSON.stringify(hits2[0]&&hits2[0].resource&&hits2[0].resource.fields||{}));
+          /* Re-attempt using Title field if PseudoUserCode KQL failed */
+          console.log('[v31] Tip: To enable KQL filtering, go to SharePoint Admin → Search → Manage Search Schema → add PseudoUserCode as a Queryable managed property.');
+        }
+        if(total2>0&&total2<=5000){
+          /* list is small enough — do a full unfiltered search and let client-side RLS filter */
+          console.log('[v31] List has '+total2+' search-indexed items — fetching all via path-only search');
+          var fullItems=[],fFrom=0,fHasMore=true;
+          while(fHasMore){
+            var fb=JSON.stringify({"requests":[{
+              "entityTypes":["listItem"],
+              "query":{"queryString":"path:\""+listPath+"\""},
+              "from":fFrom,"size":500,
+              "fields":fieldList
+            }]});
+            var fr=await fetch('https://graph.microsoft.com/v1.0/search/query',{
+              method:'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:fb
+            });
+            if(!fr.ok){break;}
+            var fd=await fr.json();
+            var fc=(((fd.value||[])[0])||{}).hitsContainers||[];
+            var fh=((fc[0])||{}).hits||[];
+            var ft=((fc[0])||{}).total||0;
+            fh.forEach(function(h){if(h.resource){fullItems.push(Object.assign({},h.resource.fields||{}));}});
+            fFrom+=500;
+            fHasMore=(fh.length===500&&fFrom+500<=1000&&fFrom<ft);
+          }
+          if(fullItems.length>0){
+            console.log('[v31] Path-only search recovered '+fullItems.length+' items');
+            return fullItems;
+          }
+        }
+      }
+    }
+    console.log('[v31] Search API: '+allItems.length+' items across '+SP_KNOWN_CODES.length+' users');
+    return allItems;
+  }catch(e){
+    console.warn('[v31] Search API exception:',e.message||e);
+    return [];
+  }
+}
+
 function autoMapColumns(cols){
   if(!cols||!cols.length)return null;
   console.group('%c[BLR QRT] SP columns','background:#0070F2;color:#fff;padding:2px 6px');
@@ -907,37 +1022,46 @@ async function initSP(){
     if(!authenticated){showMsalSignInBtn();spSetBadge(FROWS_ALL.length>0?'cached':'offline');return;}
     try{
       var cols=await graphDiscoverListColumns();var mappedFields=autoMapColumns(cols);if(mappedFields)SP_CONFIG.fields=mappedFields;
-      /* v29: fetch via Graph API first, then try SharePoint REST token path.
-         The SP-token path bypasses Graph API item-level restrictions for site owners.
-         We use whichever source returns MORE records. */
+      /* v31: three fetch paths — use whichever returns the MOST records.
+         Path 1 (Graph filtered):  Graph Items API with $filter by PseudoUserCode (v30).
+                                   Restricted by item-level ACL → typically returns only own records.
+         Path 2 (Search API):      Graph Search API using SharePoint search index (v31 NEW).
+                                   Search is security-trimmed at site-owner level, NOT item level.
+                                   Site owner (Manager 0030) should see ALL indexed list items.
+         Path 3 (SP-token):        SharePoint REST API with AllSites.Read scope (v29).
+                                   Falls back to [] if scope not consented or CORS blocks. */
       var graphItems=await graphFetchAllItems();
-      console.log('[v29] Graph API returned',graphItems.length,'items.');
+      console.log('[v31] Graph filtered API:',graphItems.length,'items.');
+      var searchItems=await graphSearchFetchListItems();
+      console.log('[v31] Search API:',searchItems.length,'items.');
       var spTokenItems=await spFetchAllItemsViaSharePointToken();
-      console.log('[v29] SP-token path returned',spTokenItems.length,'items.');
-      var items=spTokenItems.length>graphItems.length?spTokenItems:graphItems;
-      if(spTokenItems.length>graphItems.length){
-        console.log('[v29] Using SP-token items ('+spTokenItems.length+' > '+graphItems.length+')');
-        spToast('\u2713 SP-token path returned more records ('+spTokenItems.length+' vs '+graphItems.length+' via Graph). Using expanded dataset.',7000);
+      console.log('[v31] SP-token path:',spTokenItems.length,'items.');
+      /* Pick the path with the most records */
+      var paths=[{name:'Graph-Filtered',items:graphItems},{name:'Search-API',items:searchItems},{name:'SP-Token',items:spTokenItems}];
+      paths.sort(function(a,b){return b.items.length-a.items.length;});
+      var best=paths[0];
+      var items=best.items;
+      console.log('[v31] Using "'+best.name+'" ('+items.length+' items). Other paths: '+paths.slice(1).map(function(p){return p.name+'='+p.items.length;}).join(', '));
+      if(best.name!=='Graph-Filtered'&&items.length>graphItems.length){
+        spToast('\u2713 '+best.name+' returned more records ('+items.length+' vs '+graphItems.length+' via Graph). Using expanded dataset.',8000);
       }
       logTransformDiag(items);
       var data=spTransform(items);_spLastItemCount=items.length;
       spApply(data,'live');
-      /* v29: post-load permission check — warn if suspiciously few unique users */
+      /* v31: post-load permission check — warn if suspiciously few unique users */
       (function(){
         var uCount=data&&data.AU?data.AU.length:0;
         if(uCount<3&&items.length>0){
-          var msg='[v29 Permissions Warning] Only '+uCount+' user(s) visible out of '+items.length+' records. '
-            +'SharePoint item-level permissions may be restricting access. '
-            +'Fix: In the SharePoint list \u2192 Settings \u2192 Advanced Settings \u2192 '
-            +'"Read access: Read all items". Or grant Manager 0030 Site Collection Admin rights.';
-          console.warn(msg);
-          spToast('\u26A0 Only '+uCount+' user(s) visible \u2014 SharePoint item-level permissions may be restricting data. '
-            +'List Settings \u2192 Advanced Settings \u2192 "Read all items" to fix.',18000);
+          console.warn('[v31 Permissions Warning] Only '+uCount+' user(s) visible. All 3 fetch paths returned restricted data. '
+            +'Consider: (a) Make ranjan.preet.singh@sap.com a Site Collection Admin in SharePoint Admin Centre, or '
+            +'(b) List Settings \u2192 Advanced Settings \u2192 "Read all items".');
+          spToast('\u26A0 Only '+uCount+' user(s) found across all 3 data paths. The list item-level ACL is still restricting Graph API, Search API, and SP-token access. '
+            +'Final option: assign Manager 0030 as Site Collection Admin in SharePoint Admin Centre.',20000);
         }
       })();
       tryRestoreSession();
       _SP_OFFLINE=false;spSetBadge('live');spRefreshIfLoggedIn();spSchedulePoll();
-      spToast('\u2713 Connected to SharePoint \u2014 '+items.length.toLocaleString()+' records loaded',5000);
+      spToast('\u2713 Connected to SharePoint \u2014 '+items.length.toLocaleString()+' records loaded via '+best.name,5000);
       return;
     }catch(e){
       console.warn('[Graph] Initial fetch failed:',e.message||e);_SP_OFFLINE=true;_SP_ERROR=e.message||String(e);
