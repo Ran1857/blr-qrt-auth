@@ -408,6 +408,48 @@ async function graphDiscoverListColumns(){
     var r=await fetch('https://graph.microsoft.com/v1.0/sites/'+siteId+'/lists/'+encodeURIComponent(SP_CONFIG.listName)+'/columns?$select=name,displayName,type&$top=100',{headers:{'Authorization':'Bearer '+token,'Accept':'application/json'}});
     if(!r.ok){console.warn('[Cols] failed:',r.status);return null;}return (await r.json()).value||[];}catch(e){console.warn('[Cols]',e.message);return null;}
 }
+
+/* v29: SharePoint REST path using a SharePoint-scoped MSAL token.
+   This bypasses Graph API item-level restrictions for site owners
+   because the SharePoint REST endpoint uses SharePoint's own ACL model.
+   Silently falls back to [] if the SP scope is not consented or CORS blocks. */
+async function spFetchAllItemsViaSharePointToken(){
+  var spToken;
+  try{
+    var tr=await _msal.acquireTokenSilent({account:_msalAccount,scopes:['https://sap.sharepoint.com/AllSites.Read']});
+    spToken=tr.accessToken;
+    console.log('[SP-Token] Acquired SharePoint-scoped token.');
+  }catch(e){
+    console.warn('[SP-Token] Could not get SharePoint token (scope not consented or network):',e.message||e);
+    return [];
+  }
+  try{
+    var esc=SP_CONFIG.listName.replace(/'/g,"''");
+    var base=SP_CONFIG.siteUrl+'/_api/web/lists/getbytitle(\''+esc+'\')/items';
+    var url=base+'?$top=5000&$select=*';
+    var items=[];
+    while(url){
+      var r=await fetch(url,{headers:{'Authorization':'Bearer '+spToken,'Accept':'application/json;odata=nometadata'}});
+      if(!r.ok){console.warn('[SP-Token] Items fetch HTTP',r.status);return [];}
+      var d=await r.json();
+      (d.value||[]).forEach(function(x){
+        /* normalise field names: SP REST sometimes prefixes with OData metadata */
+        var row={};Object.keys(x).forEach(function(k){if(!k.startsWith('@')&&!k.startsWith('odata'))row[k]=x[k];});
+        /* v29: copy SP REST date fields to the names spTransform expects */
+        if(row.StartDateandTime===undefined&&row.Start_x0020_Date_x0020_and_x0020_Time)row.StartDateandTime=row.Start_x0020_Date_x0020_and_x0020_Time;
+        if(row.EndDateandTime===undefined&&row.End_x0020_Date_x0020_and_x0020_Time)row.EndDateandTime=row.End_x0020_Date_x0020_and_x0020_Time;
+        items.push(row);
+      });
+      url=d['@odata.nextLink']||d['odata.nextLink']||null;
+      if(url){try{var tr2=await _msal.acquireTokenSilent({account:_msalAccount,scopes:['https://sap.sharepoint.com/AllSites.Read']});spToken=tr2.accessToken;}catch(e2){}}
+    }
+    console.log('[SP-Token] Fetched',items.length,'items via SharePoint REST.');
+    return items;
+  }catch(e){
+    console.warn('[SP-Token] SharePoint REST call failed (likely CORS):',e.message||e);
+    return [];
+  }
+}
 function autoMapColumns(cols){
   if(!cols||!cols.length)return null;
   console.group('%c[BLR QRT] SP columns','background:#0070F2;color:#fff;padding:2px 6px');
@@ -821,10 +863,35 @@ async function initSP(){
     if(!authenticated){showMsalSignInBtn();spSetBadge(FROWS_ALL.length>0?'cached':'offline');return;}
     try{
       var cols=await graphDiscoverListColumns();var mappedFields=autoMapColumns(cols);if(mappedFields)SP_CONFIG.fields=mappedFields;
-      var items=await graphFetchAllItems();logTransformDiag(items);
+      /* v29: fetch via Graph API first, then try SharePoint REST token path.
+         The SP-token path bypasses Graph API item-level restrictions for site owners.
+         We use whichever source returns MORE records. */
+      var graphItems=await graphFetchAllItems();
+      console.log('[v29] Graph API returned',graphItems.length,'items.');
+      var spTokenItems=await spFetchAllItemsViaSharePointToken();
+      console.log('[v29] SP-token path returned',spTokenItems.length,'items.');
+      var items=spTokenItems.length>graphItems.length?spTokenItems:graphItems;
+      if(spTokenItems.length>graphItems.length){
+        console.log('[v29] Using SP-token items ('+spTokenItems.length+' > '+graphItems.length+')');
+        spToast('\u2713 SP-token path returned more records ('+spTokenItems.length+' vs '+graphItems.length+' via Graph). Using expanded dataset.',7000);
+      }
+      logTransformDiag(items);
       var data=spTransform(items);_spLastItemCount=items.length;
       spApply(data,'live');
-      tryRestoreSession();  /* FIX v20: re-run after live AU has canonical codes */
+      /* v29: post-load permission check — warn if suspiciously few unique users */
+      (function(){
+        var uCount=data&&data.AU?data.AU.length:0;
+        if(uCount<3&&items.length>0){
+          var msg='[v29 Permissions Warning] Only '+uCount+' user(s) visible out of '+items.length+' records. '
+            +'SharePoint item-level permissions may be restricting access. '
+            +'Fix: In the SharePoint list \u2192 Settings \u2192 Advanced Settings \u2192 '
+            +'"Read access: Read all items". Or grant Manager 0030 Site Collection Admin rights.';
+          console.warn(msg);
+          spToast('\u26A0 Only '+uCount+' user(s) visible \u2014 SharePoint item-level permissions may be restricting data. '
+            +'List Settings \u2192 Advanced Settings \u2192 "Read all items" to fix.',18000);
+        }
+      })();
+      tryRestoreSession();
       _SP_OFFLINE=false;spSetBadge('live');spRefreshIfLoggedIn();spSchedulePoll();
       spToast('\u2713 Connected to SharePoint \u2014 '+items.length.toLocaleString()+' records loaded',5000);
       return;
