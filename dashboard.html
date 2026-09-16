@@ -121,11 +121,17 @@ tr:hover td{background:#F8F9FB}tr:last-child td{border-bottom:none}
 #toast.show{opacity:1}
 @media(max-width:700px){.charts{grid-template-columns:1fr}.chart.full{grid-column:auto}.kpis{grid-template-columns:repeat(2,1fr)}.hdr{padding:0 12px;gap:8px}.hTitle h1{font-size:13px}.tabPane{padding:14px 12px}.filterBar{padding:10px 12px}}
 /* SAP Concur logo wrapper */
-.hLogoWrap{display:flex;align-items:center;gap:0;flex-shrink:0}
-.hLogoConcur{font-size:14px;font-weight:700;color:#fff;letter-spacing:-.2px;margin-left:9px;padding-left:9px;border-left:1.5px solid rgba(255,255,255,.32)}
+.hLogoWrap{display:flex;align-items:center;flex-shrink:0}
+.hLogoBrand{display:flex;align-items:center;gap:0;margin-left:10px;padding-left:10px;border-left:1.5px solid rgba(255,255,255,.32);font-size:13px;color:#fff;white-space:nowrap}
+.hLogoBrand .sapTxt{font-weight:800;letter-spacing:.4px}
+.hLogoBrand .pipeTxt{margin:0 5px;opacity:.55;font-weight:300}
+.hLogoBrand .concurTxt{font-weight:600;letter-spacing:.2px}
 /* Login card SAP Concur mark */
 .lcBrand{display:flex;align-items:center;gap:0;margin-bottom:20px}
-.lcConcur{font-size:14px;font-weight:700;color:#00144A;letter-spacing:-.2px;margin-left:9px;padding-left:9px;border-left:1.5px solid #D5D6D7}
+.lcBrandTxt{display:flex;align-items:center;gap:0;margin-left:10px;padding-left:10px;border-left:1.5px solid #D5D6D7;font-size:14px;color:#00144A;white-space:nowrap}
+.lcBrandTxt .sapTxt{font-weight:800;letter-spacing:.4px}
+.lcBrandTxt .pipeTxt{margin:0 5px;color:#999;font-weight:300}
+.lcBrandTxt .concurTxt{font-weight:600}
 </style>
 </head>
 <body>
@@ -133,8 +139,8 @@ tr:hover td{background:#F8F9FB}tr:last-child td{border-bottom:none}
 <div id="loginOverlay">
   <div class="loginCard">
     <div class="lcBrand">
-      <svg viewBox="0 0 62 25" height="26" style="flex-shrink:0"><path d="M0 0h10.3v25H0z" fill="#00144A"/><path d="M12.8 0h10.3v25H12.8z" fill="#0070F2"/><path d="M25.6 0H36v25H25.6z" fill="#00144A"/><path d="M38.5 0h23.4v12.5H38.5z" fill="#0070F2"/><path d="M38.5 12.5h23.4V25H38.5z" fill="#00144A"/></svg>
-      <span class="lcConcur">Concur</span>
+      <svg viewBox="0 0 62 25" height="28" style="flex-shrink:0"><path d="M0 0h10.3v25H0z" fill="#00144A"/><path d="M12.8 0h10.3v25H12.8z" fill="#0070F2"/><path d="M25.6 0H36v25H25.6z" fill="#00144A"/><path d="M38.5 0h23.4v12.5H38.5z" fill="#0070F2"/><path d="M38.5 12.5h23.4V25H38.5z" fill="#00144A"/></svg>
+      <div class="lcBrandTxt"><span class="sapTxt">SAP</span><span class="pipeTxt">|</span><span class="concurTxt">Concur</span></div>
     </div>
     <div class="loginTitle">BLR QRT Dashboard</div>
     <div class="loginSub">Enter your PIN to access the dashboard</div>
@@ -146,8 +152,8 @@ tr:hover td{background:#F8F9FB}tr:last-child td{border-bottom:none}
 </div>
 <header class="hdr">
   <div class="hLogoWrap">
-    <svg viewBox="0 0 62 25" height="26" style="flex-shrink:0"><path d="M0 0h10.3v25H0z" fill="#fff"/><path d="M12.8 0h10.3v25H12.8z" fill="#4CB1FF"/><path d="M25.6 0H36v25H25.6z" fill="#fff"/><path d="M38.5 0h23.4v12.5H38.5z" fill="#4CB1FF"/><path d="M38.5 12.5h23.4V25H38.5z" fill="#fff"/></svg>
-    <span class="hLogoConcur">Concur</span>
+    <svg viewBox="0 0 62 25" height="28" style="flex-shrink:0"><path d="M0 0h10.3v25H0z" fill="#fff"/><path d="M12.8 0h10.3v25H12.8z" fill="#4CB1FF"/><path d="M25.6 0H36v25H25.6z" fill="#fff"/><path d="M38.5 0h23.4v12.5H38.5z" fill="#4CB1FF"/><path d="M38.5 12.5h23.4V25H38.5z" fill="#fff"/></svg>
+    <div class="hLogoBrand"><span class="sapTxt">SAP</span><span class="pipeTxt">|</span><span class="concurTxt">Concur</span></div>
   </div>
   <div class="hTitle"><h1>BLR QRT Activity Monitoring Dashboard</h1><p>BLR QRT Activity Monitoring Dashboard &bull; <span id="hdrCount">&#8212;</span> Records</p></div>
   <div class="hr2">
@@ -162,6 +168,7 @@ tr:hover td{background:#F8F9FB}tr:last-child td{border-bottom:none}
         <button onclick="shareAction('csv')">Share as CSV</button>
         <hr>
         <button onclick="shareAction('load')">Load data from CSV</button>
+        <button onclick="shareAction('clear')" style="color:#BB0000">Clear cache &amp; reload</button>
       </div>
     </div>
   </div>
@@ -226,7 +233,9 @@ tr:hover td{background:#F8F9FB}tr:last-child td{border-bottom:none}
    v22: Clear MSAL interaction_in_progress lock (stale from old popup attempts) before
         every loginRedirect call. Show real MSAL errorCode in toast if redirect still fails.
    v23: CDN fallback (jsdelivr onerror) if alcdn.msauth.net is blocked. Wait-loop in
-        msalInit for fallback CDN load. Null guard in msalLogin. SAP Concur branding. */
+        msalInit for fallback CDN load. Null guard in msalLogin. SAP Concur branding.
+   v24: SAP | Concur text branding in header and login card. Stale cache detection
+        warning when < 5 users found in cache. clearCacheAndReload() + Share menu option. */
 
 var MSAL_CFG={auth:{clientId:'b0e1ba73-7ff2-4c9f-91c4-eb2bf78adfe2',authority:'https://login.microsoftonline.com/42f7676c-f455-423c-82f6-dc2d99791af7',redirectUri:'https://ran1857.github.io/blr-qrt-auth/dashboard.html'},cache:{cacheLocation:'sessionStorage',storeAuthStateInCookie:false}};
 var MSAL_SCOPES=['https://graph.microsoft.com/Sites.Read.All'];
@@ -416,7 +425,19 @@ function spApply(data,source){
   FROWS_ALL=data.FROWS;KROWS_ALL=data.KROWS;
   rebuildDropdowns();
   if(source!=='cache'){saveCacheToStorage(data);var lbl=(source==='csv'?'CSV imported':'Live')+' \u2014 '+fmtIST(new Date())+' IST';_updateTimestampLabel('Last Updated: '+lbl);}
+  /* v24: warn when cached data is stale / incomplete */
+  if(source==='cache'&&AU.length<5){
+    setTimeout(function(){
+      spToast('\u26A0 Cached data is incomplete ('+AU.length+' user'+(AU.length!==1?'s':'')+' found). Sign in for live data or use Share \u2192 Clear cache.',10000);
+    },1200);
+  }
   updateShareMenuLabels();
+}
+function clearCacheAndReload(){
+  clearCacheFromStorage();
+  try{sessionStorage.removeItem('rlsUser');}catch(e){}
+  spToast('Cache cleared \u2014 reloading\u2026',2500);
+  setTimeout(function(){location.reload();},2000);
 }
 var CACHE_KEY='blrqrt_data_v1';
 function saveCacheToStorage(data){try{var pl=JSON.stringify({v:1,ts:new Date().toISOString(),AU:data.AU,AA:data.AA,MONTHS:data.MONTHS,MR:data.MR,FROWS:data.FROWS,KROWS:data.KROWS});localStorage.setItem(CACHE_KEY,pl);console.log('[Cache] Saved',data.FROWS.length,'rows ('+Math.round(pl.length/1024)+' KB)');}catch(e){console.warn('[Cache]',e.message);}}
@@ -579,6 +600,7 @@ function shareAction(type){
   if(type==='url'){try{navigator.clipboard.writeText(window.location.href);spToast('Dashboard link copied to clipboard.');}catch(e){spToast('Copy: '+window.location.href);}}
   else if(type==='csv'){exportCSV();}
   else if(type==='load'){document.getElementById('csvModal').classList.add('open');}
+  else if(type==='clear'){clearCacheAndReload();}
 }
 document.addEventListener('click',function(e){var sm=document.getElementById('shareMenu');if(sm&&!sm.closest('.shareWrap').contains(e.target))sm.classList.remove('open');});
 function exportCSV(){
