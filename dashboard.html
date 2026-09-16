@@ -211,9 +211,11 @@ tr:hover td{background:#F8F9FB}tr:last-child td{border-bottom:none}
 
 <script>
 /* BLR QRT Activity Monitoring Dashboard v20
-   Fixes: get() encoding bug, AU defensive guard, tryRestoreSession after live load */
+   Fixes: get() encoding bug, AU defensive guard, tryRestoreSession after live load
+   v21: Switch from acquireTokenPopup to loginRedirect — fixes popup-blocked sign-in.
+        redirectUri now points at dashboard.html directly. No popup used anywhere. */
 
-var MSAL_CFG={auth:{clientId:'b0e1ba73-7ff2-4c9f-91c4-eb2bf78adfe2',authority:'https://login.microsoftonline.com/42f7676c-f455-423c-82f6-dc2d99791af7',redirectUri:'https://ran1857.github.io/blr-qrt-auth/'},cache:{cacheLocation:'sessionStorage',storeAuthStateInCookie:false}};
+var MSAL_CFG={auth:{clientId:'b0e1ba73-7ff2-4c9f-91c4-eb2bf78adfe2',authority:'https://login.microsoftonline.com/42f7676c-f455-423c-82f6-dc2d99791af7',redirectUri:'https://ran1857.github.io/blr-qrt-auth/dashboard.html'},cache:{cacheLocation:'sessionStorage',storeAuthStateInCookie:false}};
 var MSAL_SCOPES=['https://graph.microsoft.com/Sites.Read.All'];
 var SP_CONFIG={siteUrl:'https://sap.sharepoint.com/teams/BLRQualityReviewActivityMonitoringTool',listName:'BLR Quality Review Activity Monitoring Tool1',pageSize:2000,pollInterval:15000,fields:{user:'PseudoUserCode',startDate:'StartDate',endDate:'EndDate',timeMins:'TimeSpent',activity:'ActivityTask',client:'BatchReportIds',status:'Status'}};
 function isMsalConfigured(){return !!(MSAL_CFG.auth.clientId&&MSAL_CFG.auth.clientId!=='YOUR_CLIENT_ID');}
@@ -225,33 +227,47 @@ var _RLS_IDX=-1,_PIN_ATTEMPTS=0,cP=1,PAGE_SIZE=50,_D={};
 var CLRS=['#0070F2','#F0AB00','#1A7840','#00144A','#6A5ACD','#E44D26','#00A9CE','#F56C2D','#8B5CF6','#059669'];
 
 async function msalInit(){
-  try{_msal=new msal.PublicClientApplication(MSAL_CFG);await _msal.initialize();await _msal.handleRedirectPromise();
-    var a=_msal.getAllAccounts();if(a.length>0){_msalAccount=a[0];return true;}
-    try{var t=await _msal.acquireTokenSilent({scopes:MSAL_SCOPES});_msalAccount=t.account;_graphToken=t.accessToken;return true;}catch(se){return false;}
+  try{
+    _msal=new msal.PublicClientApplication(MSAL_CFG);await _msal.initialize();
+    /* v21: capture redirect result — this fires when we return from loginRedirect */
+    var rr=await _msal.handleRedirectPromise();
+    if(rr){_msalAccount=rr.account;_graphToken=rr.accessToken;
+      console.log('[MSAL] Redirect auth completed:',_msalAccount.username);return true;}
+    var a=_msal.getAllAccounts();if(a.length>0){_msalAccount=a[0];
+      try{var t=await _msal.acquireTokenSilent({account:_msalAccount,scopes:MSAL_SCOPES});
+        _msalAccount=t.account;_graphToken=t.accessToken;return true;}
+      catch(se){console.warn('[MSAL] Silent failed:',se.errorCode||se.message);return false;}}
+    return false;
   }catch(e){console.warn('[MSAL]',e.message);return false;}
 }
-async function msalLogin(){try{var t=await _msal.acquireTokenPopup({scopes:MSAL_SCOPES});_msalAccount=t.account;_graphToken=t.accessToken;return true;}catch(e){return false;}}
+/* v21: redirect-based sign-in — no popup, works in all corporate browsers */
+async function msalLogin(){
+  try{await _msal.loginRedirect({scopes:MSAL_SCOPES});/* browser navigates away */}
+  catch(e){console.warn('[MSAL] loginRedirect failed:',e.message);return false;}
+}
 async function msalGetToken(){
   if(!_msal||!_msalAccount)return null;
   try{var t=await _msal.acquireTokenSilent({account:_msalAccount,scopes:MSAL_SCOPES});_graphToken=t.accessToken;return _graphToken;}
-  catch(e){try{var t2=await _msal.acquireTokenPopup({scopes:MSAL_SCOPES});_msalAccount=t2.account;_graphToken=t2.accessToken;return _graphToken;}catch(e2){return null;}}
+  catch(e){/* silent token refresh failed — show sign-in button, skip poll cycle */
+    console.warn('[MSAL] Token refresh failed:',e.errorCode||e.message);
+    _graphToken=null;showMsalSignInBtn();spSetBadge(FROWS_ALL.length>0?'cached':'offline');return null;}
 }
 function showMsalSignInBtn(){
   if(document.getElementById('msalSignInBtn'))return;
   var hdr=document.querySelector('.hr2');if(!hdr)return;
   var btn=document.createElement('button');btn.id='msalSignInBtn';btn.className='bexp';btn.style.cssText='background:#0078D4;gap:7px';
-  btn.innerHTML='<svg viewBox="0 0 21 21" width="14" height="14"><rect x="1" y="1" width="9" height="9" fill="#F25022"/><rect x="11" y="1" width="9" height="9" fill="#7FBA00"/><rect x="1" y="11" width="9" height="9" fill="#00A4EF"/><rect x="11" y="11" width="9" height="9" fill="#FFB900"/></svg>Sign in for live data';
+  var msIco='<svg viewBox="0 0 21 21" width="14" height="14"><rect x="1" y="1" width="9" height="9" fill="#F25022"/><rect x="11" y="1" width="9" height="9" fill="#7FBA00"/><rect x="1" y="11" width="9" height="9" fill="#00A4EF"/><rect x="11" y="11" width="9" height="9" fill="#FFB900"/></svg>';
+  btn.innerHTML=msIco+'Sign in for live data';
   btn.onclick=async function(){
-    btn.disabled=true;btn.textContent='Signing in\u2026';spSetBadge('connecting');
-    var ok=await msalLogin();
-    if(ok){btn.remove();
-      try{var cols=await graphDiscoverListColumns();var mf=autoMapColumns(cols);if(mf)SP_CONFIG.fields=mf;
-        var items=await graphFetchAllItems();logTransformDiag(items);
-        var data=spTransform(items);_spLastItemCount=items.length;
-        spApply(data,'live');tryRestoreSession();_SP_OFFLINE=false;spSetBadge('live');spRefreshIfLoggedIn();spSchedulePoll();
-        spToast('\u2713 Connected \u2014 '+items.length.toLocaleString()+' records loaded');
-      }catch(e){console.warn('[Graph]',e);spSetBadge('offline');_SP_ERROR=e.message||String(e);showMsalSignInBtn();spToast('\u26A0 SP fetch failed: '+_SP_ERROR.slice(0,80),8000);}
-    }else{btn.disabled=false;btn.textContent='Sign in for live data';spSetBadge(FROWS_ALL.length>0?'cached':'offline');spToast('\u26A0 Sign-in cancelled.',5000);}
+    btn.disabled=true;btn.innerHTML=msIco+'Redirecting to Microsoft\u2026';
+    spSetBadge('connecting');spToast('Redirecting to Microsoft sign-in\u2026',3000);
+    /* v21: loginRedirect — no popup, browser navigates to MS login then returns */
+    var failed=await msalLogin();
+    /* only reaches here if loginRedirect itself threw */
+    if(failed===false){
+      btn.disabled=false;btn.innerHTML=msIco+'Sign in for live data';
+      spSetBadge(FROWS_ALL.length>0?'cached':'offline');
+      spToast('\u26A0 Could not start sign-in. Check the Azure redirect URI.',7000);}
   };
   var eb=hdr.querySelector('.bexp');hdr.insertBefore(btn,eb||null);
 }
