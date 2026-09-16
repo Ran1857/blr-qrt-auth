@@ -386,7 +386,15 @@ async function graphFetchAllItems(){
   var items=[],page=0;
   while(url){var token=await msalGetToken();var r=await fetch(url,{headers:{'Authorization':'Bearer '+token,'Accept':'application/json'}});
     if(!r.ok)throw new Error('Graph items: '+r.status);var d=await r.json();
-    (d.value||[]).forEach(function(i){items.push(Object.assign({},i.fields||{}));});
+    (d.value||[]).forEach(function(i){
+      var row=Object.assign({},i.fields||{});
+      /* v26: pull createdBy as fallback user-identity when PseudoUserCode is blank */
+      if(i.createdBy&&i.createdBy.user){
+        row['_createdByEmail']=i.createdBy.user.email||i.createdBy.user.loginName||'';
+        row['_createdByName']=i.createdBy.user.displayName||'';
+      }
+      items.push(row);
+    });
     page++;console.log('[Graph] Loaded '+items.length+' records (page '+page+')');url=d['@odata.nextLink']||null;}
   return items;
 }
@@ -452,7 +460,8 @@ function spTransform(items){
   var mLabels=mkArr.map(function(mk){return new Date(mk+'-15T00:00:00+05:30').toLocaleString('en-GB',{timeZone:'Asia/Kolkata',month:'short',year:'numeric'});});
   var mIdx={};mkArr.forEach(function(mk,i){mIdx[mk]=i;});
   items.forEach(function(it){
-    var uvRaw=get(it,f.user)||get(it,'PseudoUserCode')||get(it,'Pseudo_x0020_User_x0020_Code')||it['Title']||'';
+    /* v26: added _createdByEmail/_createdByName fallbacks so records survive even when PseudoUserCode is blank */
+    var uvRaw=get(it,f.user)||get(it,'PseudoUserCode')||get(it,'Pseudo_x0020_User_x0020_Code')||get(it,'_createdByEmail')||get(it,'_createdByName')||it['Title']||'';
     var uv=normalizeUser(uvRaw);if(!uv)return;
     if(uMap[uv]===undefined){uMap[uv]=users.length;users.push(uv);}var ui=uMap[uv];
     var av=String(get(it,f.activity)||get(it,'ActivityTask')||get(it,'Activity_x002F_Task')||get(it,'ActivityType')||get(it,'Activity_x0020_Type')||'Unknown').trim();
@@ -468,13 +477,29 @@ function spTransform(items){
   });
   return {AU:users,AA:acts,MONTHS:mLabels,MR:mkArr,FROWS:fRows,KROWS:kRows};
 }
+/* v26: enhanced diagnostic — tallies all unique raw user values, shows auto-mapped field, posts visible toast */
 function logTransformDiag(items){
-  if(!items||!items.length)return;var f=SP_CONFIG.fields;
-  console.group('%c[BLR QRT] Transform diagnostics','background:#1A7840;color:#fff;padding:2px 6px');
-  console.log('All field keys (first item):',Object.keys(items[0]).filter(function(k){return !k.startsWith('@');}).join(', '));
-  console.log('SP_CONFIG.fields.user:',f.user);
-  var s5=items.slice(0,5).map(function(it){var g=function(k){return it[k]!==undefined&&it[k]!==null&&it[k]!==''?it[k]:undefined;};return g(f.user)||g('PseudoUserCode')||g('Pseudo_x0020_User_x0020_Code')||it['Title']||'(empty)';});
-  console.log('User field sample (first 5):',s5);console.groupEnd();
+  if(!items||!items.length)return;
+  var f=SP_CONFIG.fields;
+  console.group('%c[BLR QRT] Transform diagnostics v26','background:#1A7840;color:#fff;padding:2px 6px');
+  var allKeys=Object.keys(items[0]).filter(function(k){return !k.startsWith('@');});
+  console.log('All field keys (first item):',allKeys.join(', '));
+  console.log('SP_CONFIG.fields (auto-mapped):',JSON.stringify(f));
+  /* tally every unique raw value in the user-identity chain */
+  var rawCounts={};
+  items.forEach(function(it){
+    var g=function(k){return it[k]!==undefined&&it[k]!==null&&it[k]!==''?it[k]:undefined;};
+    var raw=g(f.user)||g('PseudoUserCode')||g('Pseudo_x0020_User_x0020_Code')||g('_createdByEmail')||g('_createdByName')||it['Title']||'(empty)';
+    var key=typeof raw==='object'?JSON.stringify(raw).slice(0,80):String(raw).slice(0,80);
+    rawCounts[key]=(rawCounts[key]||0)+1;
+  });
+  var entries=Object.keys(rawCounts).map(function(k){return k+' x'+rawCounts[k];});
+  console.log('Unique raw user values ('+entries.length+'):\n  '+entries.join('\n  '));
+  var mapped=0;
+  Object.keys(rawCounts).forEach(function(k){if(k!=='(empty)'&&USER_MAP[normalizeUser(k).toLowerCase()])mapped++;});
+  /* visible toast so the user can spot the diagnostic immediately */
+  spToast('[v26 Diag] '+items.length+' SP records | userField="'+f.user+'" | '+entries.length+' unique raw values ('+mapped+' mapped). Open F12 Console for full list.',12000);
+  console.groupEnd();
 }
 function rebuildDropdowns(){
   function fillSel(id,items,vals){var el=document.getElementById(id);if(!el)return;while(el.options.length>1)el.remove(1);items.forEach(function(x,i){var o=document.createElement('option');o.value=vals?vals[i]:x;o.textContent=x;el.appendChild(o);});}
