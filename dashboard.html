@@ -301,7 +301,13 @@ tr:hover td{background:#F8F9FB}tr:last-child td{border-bottom:none}
    v24: SAP | Concur text branding in header and login card. Stale cache detection
         warning when < 5 users found in cache. clearCacheAndReload() + Share menu option.
    v25: MSAL v2.38.3 bundled inline (no CDN). Official SAP Concur PNG logos embedded
-        as base64 data URIs. Fully self-contained — no external dependencies. */
+        as base64 data URIs. Fully self-contained — no external dependencies.
+   v30: Server-side $filter by PseudoUserCode for all 15 BLR QRT users. The SharePoint
+        list has 42,128 items — without filtering the dashboard was fetching 42 K rows
+        and Manager 0030's item-level permissions limited the result to 112.
+        With the filter, only the ~N records belonging to the 15 users are fetched,
+        dramatically reducing API calls and load time. Auto-falls back to unfiltered
+        pagination if PseudoUserCode is not indexed (HTTP 400/403/5xx). */
 
 var MSAL_CFG={auth:{clientId:'b0e1ba73-7ff2-4c9f-91c4-eb2bf78adfe2',authority:'https://login.microsoftonline.com/42f7676c-f455-423c-82f6-dc2d99791af7',redirectUri:'https://ran1857.github.io/blr-qrt-auth/dashboard.html'},cache:{cacheLocation:'sessionStorage',storeAuthStateInCookie:false}};
 var MSAL_SCOPES=['https://graph.microsoft.com/Sites.Read.All'];
@@ -380,12 +386,46 @@ async function graphGetSiteId(){
   if(!r.ok)throw new Error('getSiteId: '+r.status);
   _graphSiteId=(await r.json()).id;return _graphSiteId;
 }
+/* v30: Known PseudoUserCode values for all 15 BLR QRT users.
+   Used to build a server-side $filter so we only pull these records from
+   the 42,128-item list — instead of paginating through all 42 K rows.
+   Requires PseudoUserCode to be an indexed column in SharePoint.
+   If the filter is rejected (column not indexed / threshold error) we fall
+   back automatically to the unfiltered paginated fetch. */
+var SP_KNOWN_CODES=['Reviewer 0318','Reviewer 0319','Reviewer 0320','Reviewer 0321',
+  'Reviewer 0322','Reviewer 0323','Reviewer 0324','Reviewer 0325','Reviewer 0326',
+  'Supervisor 1207','Manager 0030','Manager 0033','Manager 0034','Manager 0053',
+  'Support 0346'];
 async function graphFetchAllItems(){
   var siteId=await graphGetSiteId();
-  var url='https://graph.microsoft.com/v1.0/sites/'+siteId+'/lists/'+encodeURIComponent(SP_CONFIG.listName)+'/items?$expand=fields&$top=2000';
-  var items=[],page=0;
-  while(url){var token=await msalGetToken();var r=await fetch(url,{headers:{'Authorization':'Bearer '+token,'Accept':'application/json'}});
-    if(!r.ok)throw new Error('Graph items: '+r.status);var d=await r.json();
+  var baseUrl='https://graph.microsoft.com/v1.0/sites/'+siteId+'/lists/'+encodeURIComponent(SP_CONFIG.listName)+'/items';
+  /* v30: build $filter from the 15 known PseudoUserCode values */
+  var filterStr=SP_KNOWN_CODES.map(function(c){
+    return 'fields/'+SP_CONFIG.fields.user+' eq \''+c+'\'';
+  }).join(' or ');
+  var items=[],page=0,useFiltered=true;
+  var url=baseUrl+'?$expand=fields&$top=2000&$filter='+encodeURIComponent(filterStr);
+  while(url){
+    var token=await msalGetToken();
+    var r=await fetch(url,{headers:{'Authorization':'Bearer '+token,'Accept':'application/json'}});
+    if(!r.ok){
+      /* filter rejected (column not indexed / list-view threshold) → fall back */
+      if(useFiltered&&(r.status===400||r.status===403||r.status===412||r.status===429||r.status>=500)){
+        console.warn('[Graph] Filtered fetch failed (HTTP '+r.status+') — falling back to unfiltered pagination.');
+        useFiltered=false;items=[];page=0;
+        url=baseUrl+'?$expand=fields&$top=2000';
+        continue;
+      }
+      throw new Error('Graph items: '+r.status);
+    }
+    var d=await r.json();
+    /* some threshold errors come back as HTTP 200 with an error body */
+    if(d.error&&useFiltered){
+      console.warn('[Graph] Filter error ('+d.error.code+'): '+d.error.message+' — falling back to unfiltered.');
+      useFiltered=false;items=[];page=0;
+      url=baseUrl+'?$expand=fields&$top=2000';
+      continue;
+    }
     (d.value||[]).forEach(function(i){
       var row=Object.assign({},i.fields||{});
       /* v26: pull createdBy as fallback user-identity when PseudoUserCode is blank */
@@ -395,7 +435,11 @@ async function graphFetchAllItems(){
       }
       items.push(row);
     });
-    page++;console.log('[Graph] Loaded '+items.length+' records (page '+page+')');url=d['@odata.nextLink']||null;}
+    page++;
+    console.log('[Graph'+(useFiltered?'-Filtered':'')+'] Loaded '+items.length+' records (page '+page+')');
+    url=d['@odata.nextLink']||null;
+  }
+  console.log('[v30] Graph '+(useFiltered?'filtered (only BLR QRT users)':'unfiltered')+' fetch: '+items.length+' items total.');
   return items;
 }
 async function graphGetItemCount(){
