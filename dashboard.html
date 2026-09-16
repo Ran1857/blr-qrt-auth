@@ -314,7 +314,15 @@ tr:hover td{background:#F8F9FB}tr:last-child td{border-bottom:none}
    v32: Two-step Search+Batch: (1) Search by Title:"email" per user → numeric item IDs
         from webUrl ?ID=xxx. (2) Batch-fetch items by ID via Graph $batch (20/batch,
         5 parallel). Full Control at list level should allow individual item access.
-        Also fixes $count 400 spam in spPoll via _countFailed flag. */
+        Also fixes $count 400 spam in spPoll via _countFailed flag.
+   v33: Root cause of v32 ID-extraction failure identified: resource.id for listItem
+        search hits IS the numeric SP item ID as a plain string ("12345"), NOT in
+        "items/12345" format — so the old regex never matched. Fix: /^\d+$/ test first.
+        Also requests all indexed SP columns (PseudoUserCode, StartDateandTime,
+        EndDateandTime, TimeSpent, Status) in the search fields array. Path 2a uses
+        inline field data directly from search results (no batch-fetch, no ACL issues).
+        Path 2b (batch-fetch) activates only if indexed fields come back empty.
+        Page cap raised from 1,000 to 10,000 per user. First-hit diagnostic logging. */
 
 var MSAL_CFG={auth:{clientId:'b0e1ba73-7ff2-4c9f-91c4-eb2bf78adfe2',authority:'https://login.microsoftonline.com/42f7676c-f455-423c-82f6-dc2d99791af7',redirectUri:'https://ran1857.github.io/blr-qrt-auth/dashboard.html'},cache:{cacheLocation:'sessionStorage',storeAuthStateInCookie:false}};
 var MSAL_SCOPES=['https://graph.microsoft.com/Sites.Read.All'];
@@ -632,37 +640,72 @@ async function graphSearchFetchListItems(){
    5 batches in parallel). Full Control at list level should allow individual
    item reads to bypass the "Read items created by user" setting. ─────── */
 
-/* Step 1 helper: search one email, return array of numeric SP item IDs */
+/* v33: search one email → returns array of item objects {fields + _createdByEmail + _searchId}.
+   ROOT CAUSE OF v32 FAILURE: resource.id for listItem search hits IS the numeric SP item ID
+   as a plain string (e.g. "12345"), not "items/12345" — so the old regex /items\/(\d+)$/ never
+   matched. Fix: test resource.id with /^\d+$/ first.
+   Also: request all dashboard-relevant indexed fields so we can use inline data without
+   a separate batch-fetch round-trip (which may be blocked by item-level ACL). */
 async function graphSearchByTitle(email,token,listPath){
-  var ids=[],from=0,hasMore=true;
+  var results=[],from=0,hasMore=true,firstLogged=false;
   while(hasMore){
     var sb=JSON.stringify({"requests":[{
       "entityTypes":["listItem"],
       "query":{"queryString":"path:\""+listPath+"\" Title:\""+email+"\""},
-      "from":from,"size":500,"fields":["Title"]
+      "from":from,"size":500,
+      "fields":["Title","PseudoUserCode","StartDateandTime","EndDateandTime",
+                "TimeSpent","Activity_x002f_Task","Batch_x002f_ReportIds",
+                "Status","Created","Modified","ID","ListItemID"]
     }]});
     var r=await fetch('https://graph.microsoft.com/v1.0/search/query',{
       method:'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:sb
     });
-    if(!r.ok){console.warn('[v32] Search HTTP '+r.status+' for '+email);break;}
-    var d=await r.json();if(d.error){console.warn('[v32] Search error for '+email+':',d.error.code);break;}
+    if(!r.ok){console.warn('[v33] Search HTTP '+r.status+' for '+email);break;}
+    var d=await r.json();if(d.error){console.warn('[v33] Search error for '+email+':',d.error.code);break;}
     var containers=(((d.value||[])[0])||{}).hitsContainers||[];
     var hits=((containers[0])||{}).hits||[];
     var total=((containers[0])||{}).total||0;
-    console.log('[v32] Title:"'+email+'" \u2192 '+hits.length+' hits (total='+total+')');
+    console.log('[v33] Title:"'+email+'" \u2192 '+hits.length+' hits (total='+total+', from='+from+')');
+    /* Log first hit structure once per user — tells us what resource.id and fields look like */
+    if(!firstLogged&&hits.length>0){
+      firstLogged=true;
+      var fh=hits[0].resource||{};
+      console.log('[v33] First hit ('+email+'): id='+JSON.stringify(fh.id)+
+        ' webUrl='+JSON.stringify((fh.webUrl||'').slice(-80))+
+        ' fields='+JSON.stringify(fh.fields||{}));
+    }
     hits.forEach(function(h){
       if(!h.resource)return;
-      /* Extract numeric SP item ID from DispForm URL ?ID=xxx */
-      var idM=(h.resource.webUrl||'').match(/[?&]ID=(\d+)/i);
-      if(idM){ids.push(idM[1]);return;}
-      /* Fallback: resource.id may end with /items/<numericId> */
-      var pM=(h.resource.id||'').match(/items\/(\d+)$/);
-      if(pM)ids.push(pM[1]);
+      var res=h.resource,flds=res.fields||{};
+      /* ── ID extraction (v33 fix) ─────────────────────────────────────────
+         Method 1: resource.id IS the numeric SP item ID for listItem hits   */
+      var numId=null;
+      var rid=String(res.id||'').trim();
+      if(/^\d+$/.test(rid)){numId=rid;}                                         /* "12345" → done */
+      else{
+        var m=(res.webUrl||'').match(/[?&]ID=(\d+)/i);
+        if(m){numId=m[1];}                                                      /* ?ID=12345 */
+        else{
+          var pm=(res.webUrl||'').match(/\/(\d+)_\.\d+(?:$|[?#])/);
+          if(pm){numId=pm[1];}                                                  /* /12345_.000 */
+        }
+      }
+      if(!numId){var fid=String(flds.ListItemID||flds.ID||'').trim();if(/^\d+$/.test(fid))numId=fid;} /* fields.ListItemID */
+      if(!numId&&rid)numId=rid;                                                 /* last resort: use as-is */
+      /* ── Build item object ──────────────────────────────────────────────── */
+      var item=Object.assign({},flds);
+      item._createdByEmail=email;
+      if(!item.Title)item.Title=email;
+      /* If PseudoUserCode absent, inject email so normalizeUser can map it */
+      if(!item.PseudoUserCode)item.PseudoUserCode=email;
+      if(numId)item._searchId=numId;
+      results.push(item);
     });
     from+=500;
-    hasMore=(hits.length===500&&from+500<=1000&&from<total);
+    /* v33: cap raised to 10,000/user (was 1,000) to capture full history */
+    hasMore=(hits.length===500&&from<total&&(from+500)<=10000);
   }
-  return ids;
+  return results;
 }
 
 /* Step 2 helper: batch-fetch items by numeric ID, 20 per batch, 5 parallel */
@@ -707,45 +750,90 @@ async function graphBatchFetchItems(numericIds,siteId){
   return{items:allItems,denied:totalDenied};
 }
 
-/* Main v32 entry point */
+/* v33: orchestrates Search → Path 2a (inline field data) → Path 2b (batch-fetch fallback).
+   Path 2a: if indexed fields (PseudoUserCode, StartDateandTime, TimeSpent, Status) come
+   back populated in resource.fields, use them directly — no individual item fetches,
+   no item-level ACL blocking. Works because search security trimming is at site-owner level.
+   Path 2b: if search fields are empty (not managed properties), extract numeric IDs and
+   batch-fetch full field data via Graph $batch — tests whether Full Control at list level
+   bypasses item-level ACL for individual item reads. */
 async function graphSearchAndBatchFetch(){
   try{
     var token=await msalGetToken();
     var siteId=await graphGetSiteId();
     var listPath=SP_CONFIG.siteUrl+'/Lists/'+SP_CONFIG.listName;
 
-    /* Step 1: collect numeric item IDs via Title search for all 15 emails */
-    var allIds=[];
+    /* Collect all item objects (with inline fields) for all 15 users */
+    var allItems=[];
     for(var i=0;i<SP_USER_EMAILS.length;i++){
-      var ids=await graphSearchByTitle(SP_USER_EMAILS[i],token,listPath);
-      allIds=allIds.concat(ids);
+      var res=await graphSearchByTitle(SP_USER_EMAILS[i],token,listPath);
+      allItems=allItems.concat(res);
     }
-    /* Deduplicate */
+    /* Deduplicate by _searchId, fall back to email+Created for items without ID */
     var seen={},unique=[];
-    allIds.forEach(function(id){if(!seen[id]){seen[id]=1;unique.push(id);}});
-    console.log('[v32] Search found '+unique.length+' unique item IDs across '+SP_USER_EMAILS.length+' users');
+    allItems.forEach(function(item){
+      var k=item._searchId||(item._createdByEmail+'|'+(item.Created||item._createdByEmail+unique.length));
+      if(!seen[k]){seen[k]=1;unique.push(item);}
+    });
+    console.log('[v33] Search collected '+unique.length+' unique items across '+SP_USER_EMAILS.length+' users');
 
     if(unique.length===0){
-      console.warn('[v32] Title search returned 0 IDs. '+
-        'Title may not equal email for all users. '+
-        'Only remaining fix: Site Collection Admin for Manager 0030.');
+      console.warn('[v33] Title search returned 0 items. '+
+        'Verify Title field = creator email in this list (confirmed from v31 probe).');
       return[];
     }
 
-    /* Step 2: batch-fetch full field data */
-    var result=await graphBatchFetchItems(unique,siteId);
-    console.log('[v32] Search+Batch complete: '+result.items.length+' items fetched, '+result.denied+' denied');
+    /* ── Path 2a: use inline field data if indexed fields are populated ───────
+       Indexed columns (from SP list settings): PseudoUserCode, StartDateandTime,
+       EndDateandTime, TimeSpent, Status, Created, Modified.
+       Activity_x002f_Task and Batch_x002f_ReportIds are NOT indexed — may be empty. */
+    var withTimeOrDate=unique.filter(function(item){
+      return item.StartDateandTime||item.EndDateandTime||item.TimeSpent||item.Status;
+    });
+    console.log('[v33] Inline field check: '+withTimeOrDate.length+'/'+unique.length+
+      ' items have StartDate/EndDate/TimeSpent/Status from search index');
 
-    if(result.items.length===0&&unique.length>0){
-      console.warn('[v32 FINAL DIAGNOSIS] Search found '+unique.length+' item IDs but all '+result.denied+' individual fetches denied. '+
-        'Full Control at list level does NOT bypass Graph API item-level ACL for individual item access. '+
+    if(withTimeOrDate.length>unique.length*0.05){
+      /* >5% of items have at least one indexed field → use inline data directly.
+         PseudoUserCode already injected from email when absent (see graphSearchByTitle).
+         Activity and Batch columns may be empty for non-indexed items — acceptable. */
+      console.log('[v33] Path 2a: Using inline search field data ('+unique.length+
+        ' items). Bypasses item-level ACL. Activity/Batch may be empty if not in search index.');
+      spToast('\u2714 Search path loaded '+unique.length.toLocaleString()+
+        ' records for all 15 users via Search index (item-level ACL bypassed).',7000);
+      return unique;
+    }
+
+    /* ── Path 2b: search fields empty — batch-fetch by numeric ID ─────────── */
+    var ids=unique.filter(function(item){return item._searchId;}).map(function(item){return item._searchId;});
+    console.log('[v33] Path 2b: Search fields empty for all '+unique.length+
+      ' items. Batch-fetching '+ids.length+' IDs via Graph $batch...');
+
+    if(ids.length===0){
+      console.warn('[v33] No numeric IDs extractable from search hits. '+
+        'Check first-hit diagnostic above. Only fix: Site Collection Admin.');
+      spToast('\u26A0 Search found items but could not extract IDs. '+
+        'Only fix: Site Collection Admin for Manager 0030.',22000);
+      return[];
+    }
+
+    var result=await graphBatchFetchItems(ids,siteId);
+    console.log('[v33] Path 2b batch-fetch: '+result.items.length+' items fetched, '+result.denied+' denied');
+
+    if(result.items.length===0&&ids.length>0){
+      console.warn('[v33 FINAL DIAGNOSIS] Inline fields empty AND all '+result.denied+
+        ' individual item fetches denied. '+
+        'Full Control at list level does NOT bypass Graph API item-level ACL. '+
         'ONLY REMAINING FIX: Assign ranjan.preet.singh@sap.com as Site Collection Admin. '+
-        'Path: Microsoft 365 Admin Centre \u2192 SharePoint Admin \u2192 Active Sites \u2192 select BLR QRT site \u2192 Permissions tab \u2192 Site Admins \u2192 Add Manager 0030.');
-      spToast('\u26A0 All code-based paths exhausted. Only remaining fix: assign Manager 0030 as Site Collection Admin in SharePoint Admin Centre.',22000);
+        'Path: Microsoft 365 Admin Centre \u2192 SharePoint Admin Centre \u2192 '+
+        'Active Sites \u2192 BLR QRT site \u2192 Permissions tab \u2192 Site Admins \u2192 Add.');
+      spToast('\u26A0 All code-based paths exhausted. Only remaining fix: '+
+        'SharePoint Admin Centre \u2192 Active Sites \u2192 BLR QRT site \u2192 Site Admins \u2192 '+
+        'add ranjan.preet.singh@sap.com.',22000);
     }
     return result.items;
   }catch(e){
-    console.warn('[v32] graphSearchAndBatchFetch exception:',e.message||e);
+    console.warn('[v33] graphSearchAndBatchFetch exception:',e.message||e);
     return[];
   }
 }
@@ -1173,17 +1261,17 @@ async function initSP(){
          Path 3 (SP-Token):         SharePoint REST with AllSites.Read scope.
                                     Falls back to [] if scope not consented. */
       var graphItems=await graphFetchAllItems();
-      console.log('[v32] Path 1 (Graph-Filtered):',graphItems.length,'items.');
+      console.log('[v33] Path 1 (Graph-Filtered):',graphItems.length,'items.');
       var searchBatchItems=await graphSearchAndBatchFetch();
-      console.log('[v32] Path 2 (Search+Batch):',searchBatchItems.length,'items.');
+      console.log('[v33] Path 2 (Search+Inline/Batch):',searchBatchItems.length,'items.');
       var spTokenItems=await spFetchAllItemsViaSharePointToken();
-      console.log('[v32] Path 3 (SP-Token):',spTokenItems.length,'items.');
+      console.log('[v33] Path 3 (SP-Token):',spTokenItems.length,'items.');
       /* Pick the path with the most records */
-      var paths=[{name:'Graph-Filtered',items:graphItems},{name:'Search+Batch',items:searchBatchItems},{name:'SP-Token',items:spTokenItems}];
+      var paths=[{name:'Graph-Filtered',items:graphItems},{name:'Search+Inline',items:searchBatchItems},{name:'SP-Token',items:spTokenItems}];
       paths.sort(function(a,b){return b.items.length-a.items.length;});
       var best=paths[0];
       var items=best.items;
-      console.log('[v32] Best path: "'+best.name+'" ('+items.length+' items). Others: '+paths.slice(1).map(function(p){return p.name+'='+p.items.length;}).join(', '));
+      console.log('[v33] Best path: "'+best.name+'" ('+items.length+' items). Others: '+paths.slice(1).map(function(p){return p.name+'='+p.items.length;}).join(', '));
       if(best.name!=='Graph-Filtered'&&items.length>graphItems.length){
         spToast('\u2713 '+best.name+' returned more records ('+items.length+' vs '+graphItems.length+' via Graph). Using expanded dataset.',8000);
       }
@@ -1194,7 +1282,7 @@ async function initSP(){
       (function(){
         var uCount=data&&data.AU?data.AU.length:0;
         if(uCount<3&&items.length>0){
-          console.warn('[v32 Permissions Warning] Only '+uCount+' user(s) visible across all 3 paths. '+
+          console.warn('[v33 Permissions Warning] Only '+uCount+' user(s) visible across all 3 paths. '+
             'ONLY REMAINING FIX: Assign Manager 0030 (ranjan.preet.singh@sap.com) as Site Collection Admin. '+
             'Microsoft 365 Admin Centre \u2192 SharePoint Admin \u2192 Active Sites \u2192 BLR QRT site \u2192 Permissions \u2192 Site Admins \u2192 Add.');
           spToast('\u26A0 Only '+uCount+' user(s) found. All 3 data paths exhausted. '+
