@@ -328,7 +328,12 @@ tr:hover td{background:#F8F9FB}tr:last-child td{border-bottom:none}
         flds.ListItemID (uppercase L) → case mismatch → fell through to GUID → 404 silently
         dropped → 0 items, 0 denied. Fix: check flds.listItemID first. Also added notFound
         and other-error tracking in graphBatchFetchItems to distinguish 404 (wrong ID) from
-        403 (ACL denied). Batch ID sample diagnostic logs whether IDs are numeric or GUID. */
+        403 (ACL denied). Batch ID sample diagnostic logs whether IDs are numeric or GUID.
+   v35: Batch URL fix: /v1.0/sites/... in individual batch requests was creating a doubled
+        version segment (https://graph.microsoft.com/v1.0/v1.0/sites/...) → 400 Bad Request
+        for all 27376 sub-requests, counted as "other". Per Graph $batch docs, individual
+        URLs must be relative to the version root, so must start with /sites/... not /v1.0/sites/.
+        Also logs first unexpected batch response status + error body for future diagnostics. */
 
 var MSAL_CFG={auth:{clientId:'b0e1ba73-7ff2-4c9f-91c4-eb2bf78adfe2',authority:'https://login.microsoftonline.com/42f7676c-f455-423c-82f6-dc2d99791af7',redirectUri:'https://ran1857.github.io/blr-qrt-auth/dashboard.html'},cache:{cacheLocation:'sessionStorage',storeAuthStateInCookie:false}};
 var MSAL_SCOPES=['https://graph.microsoft.com/Sites.Read.All'];
@@ -666,17 +671,17 @@ async function graphSearchByTitle(email,token,listPath){
     var r=await fetch('https://graph.microsoft.com/v1.0/search/query',{
       method:'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:sb
     });
-    if(!r.ok){console.warn('[v34] Search HTTP '+r.status+' for '+email);break;}
-    var d=await r.json();if(d.error){console.warn('[v34] Search error for '+email+':',d.error.code);break;}
+    if(!r.ok){console.warn('[v35] Search HTTP '+r.status+' for '+email);break;}
+    var d=await r.json();if(d.error){console.warn('[v35] Search error for '+email+':',d.error.code);break;}
     var containers=(((d.value||[])[0])||{}).hitsContainers||[];
     var hits=((containers[0])||{}).hits||[];
     var total=((containers[0])||{}).total||0;
-    console.log('[v34] Title:"'+email+'" \u2192 '+hits.length+' hits (total='+total+', from='+from+')');
+    console.log('[v35] Title:"'+email+'" \u2192 '+hits.length+' hits (total='+total+', from='+from+')');
     /* Log first hit structure once per user — tells us what resource.id and fields look like */
     if(!firstLogged&&hits.length>0){
       firstLogged=true;
       var fh=hits[0].resource||{};
-      console.log('[v34] First hit ('+email+'): id='+JSON.stringify(fh.id)+
+      console.log('[v35] First hit ('+email+'): id='+JSON.stringify(fh.id)+
         ' webUrl='+JSON.stringify((fh.webUrl||'').slice(-80))+
         ' fields='+JSON.stringify(fh.fields||{}));
     }
@@ -717,18 +722,22 @@ async function graphSearchByTitle(email,token,listPath){
 
 /* Step 2 helper: batch-fetch items by numeric ID, 20 per batch, 5 parallel
    v34: tracks 404 (wrong ID format) and other errors separately from 403 (ACL denied).
-   Diagnostic: if notFound>0 the IDs are still wrong (GUIDs); if denied>0 ACL is blocking. */
+   v35 FIX: batch URL must NOT include /v1.0/ prefix — when posting to /v1.0/$batch,
+   individual URLs are relative to https://graph.microsoft.com/v1.0/, so the URL must
+   start with /sites/..., not /v1.0/sites/... (double-version was causing 400 for all). */
 async function graphBatchFetchItems(numericIds,siteId){
   var listEnc=encodeURIComponent(SP_CONFIG.listName);
-  var basePath='/v1.0/sites/'+siteId+'/lists/'+listEnc+'/items/';
+  /* v35 FIX: remove /v1.0/ prefix — batch URLs relative to /v1.0/ base already */
+  var basePath='/sites/'+siteId+'/lists/'+listEnc+'/items/';
   var allItems=[],totalDenied=0,totalNotFound=0,totalOther=0;
 
-  /* v34: log sample ID so we can confirm numeric extraction worked */
+  /* v35: log sample ID and URL so we can confirm format */
   if(numericIds.length>0){
     var s0=numericIds[0];
-    var idType=/^\d+$/.test(s0)?'numeric \u2713':/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(s0)?'GUID \u26A0 (listItemID case fix failed — check v34 edit)':'other('+s0.slice(0,20)+')';
-    console.log('[v34] Batch ID sample: "'+s0+'" \u2192 '+idType+
+    var idType=/^\d+$/.test(s0)?'numeric \u2713':/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(s0)?'GUID \u26A0 (listItemID case fix failed)':'other('+s0.slice(0,20)+')';
+    console.log('[v35] Batch ID sample: "'+s0+'" \u2192 '+idType+
       '  (total '+numericIds.length+' IDs)');
+    console.log('[v35] Batch URL example: '+basePath+s0+'?$expand=fields');
   }
 
   /* group into chunks of 20 (Graph $batch limit), then run 5 chunks in parallel */
@@ -748,9 +757,9 @@ async function graphBatchFetchItems(numericIds,siteId){
         headers:{'Authorization':'Bearer '+bToken,'Content-Type':'application/json','Accept':'application/json'},
         body:JSON.stringify(body)
       });
-      if(!r.ok){console.warn('[v34] $batch HTTP '+r.status);return{items:[],denied:0,notFound:0,other:0};}
+      if(!r.ok){console.warn('[v35] $batch HTTP '+r.status);return{items:[],denied:0,notFound:0,other:0};}
       var bd=await r.json();
-      var items=[],denied=0,notFound=0,other=0;
+      var items=[],denied=0,notFound=0,other=0,firstOtherLogged=false;
       (bd.responses||[]).forEach(function(resp){
         if(resp.status===200&&resp.body){
           var row=Object.assign({},resp.body.fields||{});
@@ -759,7 +768,15 @@ async function graphBatchFetchItems(numericIds,siteId){
           items.push(row);
         }else if(resp.status===403||resp.status===401){denied++;}
         else if(resp.status===404){notFound++;}
-        else{other++;}
+        else{
+          other++;
+          if(!firstOtherLogged){
+            firstOtherLogged=true;
+            /* Log the first unexpected status + error message so we know exactly what failed */
+            console.warn('[v35] $batch first unexpected response: status='+resp.status+
+              ' body='+JSON.stringify((resp.body&&resp.body.error)||resp.body||'(null)').slice(0,300));
+          }
+        }
       });
       return{items:items,denied:denied,notFound:notFound,other:other};
     }));
@@ -769,7 +786,7 @@ async function graphBatchFetchItems(numericIds,siteId){
       totalNotFound+=(res.notFound||0);
       totalOther+=(res.other||0);
     });
-    console.log('[v34] Batch progress: '+allItems.length+' items, '+totalDenied+' denied, '+
+    console.log('[v35] Batch progress: '+allItems.length+' items, '+totalDenied+' denied, '+
       totalNotFound+' not-found, '+totalOther+' other (group '+(Math.floor(gi/PARALLEL)+1)+')');
   }
   return{items:allItems,denied:totalDenied,notFound:totalNotFound,other:totalOther};
@@ -802,10 +819,10 @@ async function graphSearchAndBatchFetch(){
       var k=item._searchId||(item._createdByEmail+'|'+(item.Created||item._createdByEmail+unique.length));
       if(!seen[k]){seen[k]=1;unique.push(item);}
     });
-    console.log('[v34] Search collected '+unique.length+' unique items across '+SP_USER_EMAILS.length+' users');
+    console.log('[v35] Search collected '+unique.length+' unique items across '+SP_USER_EMAILS.length+' users');
 
     if(unique.length===0){
-      console.warn('[v34] Title search returned 0 items. '+
+      console.warn('[v35] Title search returned 0 items. '+
         'Verify Title field = creator email in this list (confirmed from v31 probe).');
       return[];
     }
@@ -817,14 +834,14 @@ async function graphSearchAndBatchFetch(){
     var withTimeOrDate=unique.filter(function(item){
       return item.StartDateandTime||item.EndDateandTime||item.TimeSpent||item.Status;
     });
-    console.log('[v34] Inline field check: '+withTimeOrDate.length+'/'+unique.length+
+    console.log('[v35] Inline field check: '+withTimeOrDate.length+'/'+unique.length+
       ' items have StartDate/EndDate/TimeSpent/Status from search index');
 
     if(withTimeOrDate.length>unique.length*0.05){
       /* >5% of items have at least one indexed field → use inline data directly.
          PseudoUserCode already injected from email when absent (see graphSearchByTitle).
          Activity and Batch columns may be empty for non-indexed items — acceptable. */
-      console.log('[v34] Path 2a: Using inline search field data ('+unique.length+
+      console.log('[v35] Path 2a: Using inline search field data ('+unique.length+
         ' items). Bypasses item-level ACL. Activity/Batch may be empty if not in search index.');
       spToast('\u2714 Search path loaded '+unique.length.toLocaleString()+
         ' records for all 15 users via Search index (item-level ACL bypassed).',7000);
@@ -833,31 +850,31 @@ async function graphSearchAndBatchFetch(){
 
     /* ── Path 2b: search fields empty — batch-fetch by numeric ID ─────────── */
     var ids=unique.filter(function(item){return item._searchId;}).map(function(item){return item._searchId;});
-    console.log('[v34] Path 2b: Search fields empty for all '+unique.length+
+    console.log('[v35] Path 2b: Search fields empty for all '+unique.length+
       ' items. Batch-fetching '+ids.length+' IDs via Graph $batch...');
 
     if(ids.length===0){
-      console.warn('[v34] No numeric IDs extractable from search hits. '+
+      console.warn('[v35] No numeric IDs extractable from search hits. '+
         'Check first-hit diagnostic above. Only fix: Site Collection Admin.');
       spToast('\u26A0 Search found items but could not extract IDs. '+
         'Only fix: Site Collection Admin for Manager 0030.',22000);
       return[];    }
 
     var result=await graphBatchFetchItems(ids,siteId);
-    console.log('[v34] Path 2b batch-fetch: '+result.items.length+' items fetched, '+
+    console.log('[v35] Path 2b batch-fetch: '+result.items.length+' items fetched, '+
       result.denied+' denied, '+(result.notFound||0)+' not-found, '+(result.other||0)+' other');
 
     if(result.items.length===0&&ids.length>0){
       var notF=result.notFound||0,denied=result.denied||0;
       if(notF>0){
         /* IDs resolved but returned 404 — wrong ID format still? Should not happen after v34 fix. */
-        console.warn('[v34 DIAGNOSIS] '+notF+' 404 not-found: IDs may still be in wrong format. '+
+        console.warn('[v35 DIAGNOSIS] '+notF+' 404 not-found: IDs may still be in wrong format. '+
           'Check "Batch ID sample" log above. First-hit listItemID: '+
           (ids[0]||'(none)'));
         spToast('\u26A0 Batch returned 404 for '+notF+' items. Check console for ID sample.',15000);
       }else if(denied>0){
         /* Correct numeric IDs but ACL-blocked — item-level permissions override Full Control */
-        console.warn('[v34 FINAL DIAGNOSIS] '+denied+' items denied (403). '+
+        console.warn('[v35 FINAL DIAGNOSIS] '+denied+' items denied (403). '+
           'Full Control at list level does NOT bypass Graph API item-level ACL. '+
           'ONLY REMAINING FIX: Assign ranjan.preet.singh@sap.com as Site Collection Admin. '+
           'Path: Microsoft 365 Admin Centre \u2192 SharePoint Admin Centre \u2192 '+
@@ -866,14 +883,14 @@ async function graphSearchAndBatchFetch(){
           'SharePoint Admin Centre \u2192 Active Sites \u2192 BLR QRT site \u2192 Site Admins \u2192 '+
           'add ranjan.preet.singh@sap.com.',22000);
       }else{
-        console.warn('[v34 DIAGNOSIS] 0 items, 0 denied, 0 not-found, other='+result.other+
+        console.warn('[v35 DIAGNOSIS] 0 items, 0 denied, 0 not-found, other='+result.other+
           '. Possible $batch format error — check console above.');
         spToast('\u26A0 Batch returned no data and no errors. Check console.',15000);
       }
     }
     return result.items;
   }catch(e){
-    console.warn('[v34] graphSearchAndBatchFetch exception:',e.message||e);
+    console.warn('[v35] graphSearchAndBatchFetch exception:',e.message||e);
     return[];
   }
 }
@@ -1301,17 +1318,17 @@ async function initSP(){
          Path 3 (SP-Token):         SharePoint REST with AllSites.Read scope.
                                     Falls back to [] if scope not consented. */
       var graphItems=await graphFetchAllItems();
-      console.log('[v34] Path 1 (Graph-Filtered):',graphItems.length,'items.');
+      console.log('[v35] Path 1 (Graph-Filtered):',graphItems.length,'items.');
       var searchBatchItems=await graphSearchAndBatchFetch();
-      console.log('[v34] Path 2 (Search+Inline/Batch):',searchBatchItems.length,'items.');
+      console.log('[v35] Path 2 (Search+Inline/Batch):',searchBatchItems.length,'items.');
       var spTokenItems=await spFetchAllItemsViaSharePointToken();
-      console.log('[v34] Path 3 (SP-Token):',spTokenItems.length,'items.');
+      console.log('[v35] Path 3 (SP-Token):',spTokenItems.length,'items.');
       /* Pick the path with the most records */
       var paths=[{name:'Graph-Filtered',items:graphItems},{name:'Search+Inline',items:searchBatchItems},{name:'SP-Token',items:spTokenItems}];
       paths.sort(function(a,b){return b.items.length-a.items.length;});
       var best=paths[0];
       var items=best.items;
-      console.log('[v34] Best path: "'+best.name+'" ('+items.length+' items). Others: '+paths.slice(1).map(function(p){return p.name+'='+p.items.length;}).join(', '));
+      console.log('[v35] Best path: "'+best.name+'" ('+items.length+' items). Others: '+paths.slice(1).map(function(p){return p.name+'='+p.items.length;}).join(', '));
       if(best.name!=='Graph-Filtered'&&items.length>graphItems.length){
         spToast('\u2713 '+best.name+' returned more records ('+items.length+' vs '+graphItems.length+' via Graph). Using expanded dataset.',8000);
       }
