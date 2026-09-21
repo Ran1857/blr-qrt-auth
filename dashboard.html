@@ -322,7 +322,13 @@ tr:hover td{background:#F8F9FB}tr:last-child td{border-bottom:none}
         EndDateandTime, TimeSpent, Status) in the search fields array. Path 2a uses
         inline field data directly from search results (no batch-fetch, no ACL issues).
         Path 2b (batch-fetch) activates only if indexed fields come back empty.
-        Page cap raised from 1,000 to 10,000 per user. First-hit diagnostic logging. */
+        Page cap raised from 1,000 to 10,000 per user. First-hit diagnostic logging.
+   v34: ACTUAL root cause confirmed from console: resource.id = GUID (not numeric). The
+        correct SP item ID is in resource.fields.listItemID (lowercase 'l'). v33 checked
+        flds.ListItemID (uppercase L) → case mismatch → fell through to GUID → 404 silently
+        dropped → 0 items, 0 denied. Fix: check flds.listItemID first. Also added notFound
+        and other-error tracking in graphBatchFetchItems to distinguish 404 (wrong ID) from
+        403 (ACL denied). Batch ID sample diagnostic logs whether IDs are numeric or GUID. */
 
 var MSAL_CFG={auth:{clientId:'b0e1ba73-7ff2-4c9f-91c4-eb2bf78adfe2',authority:'https://login.microsoftonline.com/42f7676c-f455-423c-82f6-dc2d99791af7',redirectUri:'https://ran1857.github.io/blr-qrt-auth/dashboard.html'},cache:{cacheLocation:'sessionStorage',storeAuthStateInCookie:false}};
 var MSAL_SCOPES=['https://graph.microsoft.com/Sites.Read.All'];
@@ -655,22 +661,22 @@ async function graphSearchByTitle(email,token,listPath){
       "from":from,"size":500,
       "fields":["Title","PseudoUserCode","StartDateandTime","EndDateandTime",
                 "TimeSpent","Activity_x002f_Task","Batch_x002f_ReportIds",
-                "Status","Created","Modified","ID","ListItemID"]
+                "Status","Created","Modified","ID","ListItemID","listItemID"]
     }]});
     var r=await fetch('https://graph.microsoft.com/v1.0/search/query',{
       method:'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:sb
     });
-    if(!r.ok){console.warn('[v33] Search HTTP '+r.status+' for '+email);break;}
-    var d=await r.json();if(d.error){console.warn('[v33] Search error for '+email+':',d.error.code);break;}
+    if(!r.ok){console.warn('[v34] Search HTTP '+r.status+' for '+email);break;}
+    var d=await r.json();if(d.error){console.warn('[v34] Search error for '+email+':',d.error.code);break;}
     var containers=(((d.value||[])[0])||{}).hitsContainers||[];
     var hits=((containers[0])||{}).hits||[];
     var total=((containers[0])||{}).total||0;
-    console.log('[v33] Title:"'+email+'" \u2192 '+hits.length+' hits (total='+total+', from='+from+')');
+    console.log('[v34] Title:"'+email+'" \u2192 '+hits.length+' hits (total='+total+', from='+from+')');
     /* Log first hit structure once per user — tells us what resource.id and fields look like */
     if(!firstLogged&&hits.length>0){
       firstLogged=true;
       var fh=hits[0].resource||{};
-      console.log('[v33] First hit ('+email+'): id='+JSON.stringify(fh.id)+
+      console.log('[v34] First hit ('+email+'): id='+JSON.stringify(fh.id)+
         ' webUrl='+JSON.stringify((fh.webUrl||'').slice(-80))+
         ' fields='+JSON.stringify(fh.fields||{}));
     }
@@ -690,8 +696,9 @@ async function graphSearchByTitle(email,token,listPath){
           if(pm){numId=pm[1];}                                                  /* /12345_.000 */
         }
       }
-      if(!numId){var fid=String(flds.ListItemID||flds.ID||'').trim();if(/^\d+$/.test(fid))numId=fid;} /* fields.ListItemID */
-      if(!numId&&rid)numId=rid;                                                 /* last resort: use as-is */
+      /* v34 FIX: Graph Search returns fields in lowercase — listItemID not ListItemID */
+      if(!numId){var fid=String(flds.listItemID||flds.ListItemID||flds.id_num||flds.ID||'').trim();if(/^\d+$/.test(fid))numId=fid;}
+      if(!numId&&rid)numId=rid;  /* last resort: use GUID as-is (will 404, see diagnostic below) */
       /* ── Build item object ──────────────────────────────────────────────── */
       var item=Object.assign({},flds);
       item._createdByEmail=email;
@@ -708,11 +715,21 @@ async function graphSearchByTitle(email,token,listPath){
   return results;
 }
 
-/* Step 2 helper: batch-fetch items by numeric ID, 20 per batch, 5 parallel */
+/* Step 2 helper: batch-fetch items by numeric ID, 20 per batch, 5 parallel
+   v34: tracks 404 (wrong ID format) and other errors separately from 403 (ACL denied).
+   Diagnostic: if notFound>0 the IDs are still wrong (GUIDs); if denied>0 ACL is blocking. */
 async function graphBatchFetchItems(numericIds,siteId){
   var listEnc=encodeURIComponent(SP_CONFIG.listName);
   var basePath='/v1.0/sites/'+siteId+'/lists/'+listEnc+'/items/';
-  var allItems=[],totalDenied=0;
+  var allItems=[],totalDenied=0,totalNotFound=0,totalOther=0;
+
+  /* v34: log sample ID so we can confirm numeric extraction worked */
+  if(numericIds.length>0){
+    var s0=numericIds[0];
+    var idType=/^\d+$/.test(s0)?'numeric \u2713':/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(s0)?'GUID \u26A0 (listItemID case fix failed — check v34 edit)':'other('+s0.slice(0,20)+')';
+    console.log('[v34] Batch ID sample: "'+s0+'" \u2192 '+idType+
+      '  (total '+numericIds.length+' IDs)');
+  }
 
   /* group into chunks of 20 (Graph $batch limit), then run 5 chunks in parallel */
   var chunks=[];
@@ -731,32 +748,42 @@ async function graphBatchFetchItems(numericIds,siteId){
         headers:{'Authorization':'Bearer '+bToken,'Content-Type':'application/json','Accept':'application/json'},
         body:JSON.stringify(body)
       });
-      if(!r.ok){console.warn('[v32] $batch HTTP '+r.status);return{items:[],denied:0};}
+      if(!r.ok){console.warn('[v34] $batch HTTP '+r.status);return{items:[],denied:0,notFound:0,other:0};}
       var bd=await r.json();
-      var items=[],denied=0;
+      var items=[],denied=0,notFound=0,other=0;
       (bd.responses||[]).forEach(function(resp){
         if(resp.status===200&&resp.body){
           var row=Object.assign({},resp.body.fields||{});
           if(resp.body.createdBy&&resp.body.createdBy.user)
             row['_createdByEmail']=resp.body.createdBy.user.email||'';
           items.push(row);
-        }else if(resp.status===403||resp.status===401)denied++;
+        }else if(resp.status===403||resp.status===401){denied++;}
+        else if(resp.status===404){notFound++;}
+        else{other++;}
       });
-      return{items:items,denied:denied};
+      return{items:items,denied:denied,notFound:notFound,other:other};
     }));
-    results.forEach(function(res){allItems=allItems.concat(res.items);totalDenied+=res.denied;});
-    console.log('[v32] Batch progress: '+allItems.length+' items, '+totalDenied+' denied (group '+(Math.floor(gi/PARALLEL)+1)+')');
+    results.forEach(function(res){
+      allItems=allItems.concat(res.items);
+      totalDenied+=res.denied;
+      totalNotFound+=(res.notFound||0);
+      totalOther+=(res.other||0);
+    });
+    console.log('[v34] Batch progress: '+allItems.length+' items, '+totalDenied+' denied, '+
+      totalNotFound+' not-found, '+totalOther+' other (group '+(Math.floor(gi/PARALLEL)+1)+')');
   }
-  return{items:allItems,denied:totalDenied};
+  return{items:allItems,denied:totalDenied,notFound:totalNotFound,other:totalOther};
 }
 
-/* v33: orchestrates Search → Path 2a (inline field data) → Path 2b (batch-fetch fallback).
+/* v34: orchestrates Search → Path 2a (inline field data) → Path 2b (batch-fetch fallback).
    Path 2a: if indexed fields (PseudoUserCode, StartDateandTime, TimeSpent, Status) come
    back populated in resource.fields, use them directly — no individual item fetches,
    no item-level ACL blocking. Works because search security trimming is at site-owner level.
    Path 2b: if search fields are empty (not managed properties), extract numeric IDs and
    batch-fetch full field data via Graph $batch — tests whether Full Control at list level
-   bypasses item-level ACL for individual item reads. */
+   bypasses item-level ACL for individual item reads.
+   v34 FIX: Graph Search returns resource.fields with LOWERCASE keys. listItemID not ListItemID.
+   The GUID in resource.id is not a valid SP item ID — listItemID is the correct numeric key. */
 async function graphSearchAndBatchFetch(){
   try{
     var token=await msalGetToken();
@@ -775,10 +802,10 @@ async function graphSearchAndBatchFetch(){
       var k=item._searchId||(item._createdByEmail+'|'+(item.Created||item._createdByEmail+unique.length));
       if(!seen[k]){seen[k]=1;unique.push(item);}
     });
-    console.log('[v33] Search collected '+unique.length+' unique items across '+SP_USER_EMAILS.length+' users');
+    console.log('[v34] Search collected '+unique.length+' unique items across '+SP_USER_EMAILS.length+' users');
 
     if(unique.length===0){
-      console.warn('[v33] Title search returned 0 items. '+
+      console.warn('[v34] Title search returned 0 items. '+
         'Verify Title field = creator email in this list (confirmed from v31 probe).');
       return[];
     }
@@ -790,14 +817,14 @@ async function graphSearchAndBatchFetch(){
     var withTimeOrDate=unique.filter(function(item){
       return item.StartDateandTime||item.EndDateandTime||item.TimeSpent||item.Status;
     });
-    console.log('[v33] Inline field check: '+withTimeOrDate.length+'/'+unique.length+
+    console.log('[v34] Inline field check: '+withTimeOrDate.length+'/'+unique.length+
       ' items have StartDate/EndDate/TimeSpent/Status from search index');
 
     if(withTimeOrDate.length>unique.length*0.05){
       /* >5% of items have at least one indexed field → use inline data directly.
          PseudoUserCode already injected from email when absent (see graphSearchByTitle).
          Activity and Batch columns may be empty for non-indexed items — acceptable. */
-      console.log('[v33] Path 2a: Using inline search field data ('+unique.length+
+      console.log('[v34] Path 2a: Using inline search field data ('+unique.length+
         ' items). Bypasses item-level ACL. Activity/Batch may be empty if not in search index.');
       spToast('\u2714 Search path loaded '+unique.length.toLocaleString()+
         ' records for all 15 users via Search index (item-level ACL bypassed).',7000);
@@ -806,34 +833,47 @@ async function graphSearchAndBatchFetch(){
 
     /* ── Path 2b: search fields empty — batch-fetch by numeric ID ─────────── */
     var ids=unique.filter(function(item){return item._searchId;}).map(function(item){return item._searchId;});
-    console.log('[v33] Path 2b: Search fields empty for all '+unique.length+
+    console.log('[v34] Path 2b: Search fields empty for all '+unique.length+
       ' items. Batch-fetching '+ids.length+' IDs via Graph $batch...');
 
     if(ids.length===0){
-      console.warn('[v33] No numeric IDs extractable from search hits. '+
+      console.warn('[v34] No numeric IDs extractable from search hits. '+
         'Check first-hit diagnostic above. Only fix: Site Collection Admin.');
       spToast('\u26A0 Search found items but could not extract IDs. '+
         'Only fix: Site Collection Admin for Manager 0030.',22000);
-      return[];
-    }
+      return[];    }
 
     var result=await graphBatchFetchItems(ids,siteId);
-    console.log('[v33] Path 2b batch-fetch: '+result.items.length+' items fetched, '+result.denied+' denied');
+    console.log('[v34] Path 2b batch-fetch: '+result.items.length+' items fetched, '+
+      result.denied+' denied, '+(result.notFound||0)+' not-found, '+(result.other||0)+' other');
 
     if(result.items.length===0&&ids.length>0){
-      console.warn('[v33 FINAL DIAGNOSIS] Inline fields empty AND all '+result.denied+
-        ' individual item fetches denied. '+
-        'Full Control at list level does NOT bypass Graph API item-level ACL. '+
-        'ONLY REMAINING FIX: Assign ranjan.preet.singh@sap.com as Site Collection Admin. '+
-        'Path: Microsoft 365 Admin Centre \u2192 SharePoint Admin Centre \u2192 '+
-        'Active Sites \u2192 BLR QRT site \u2192 Permissions tab \u2192 Site Admins \u2192 Add.');
-      spToast('\u26A0 All code-based paths exhausted. Only remaining fix: '+
-        'SharePoint Admin Centre \u2192 Active Sites \u2192 BLR QRT site \u2192 Site Admins \u2192 '+
-        'add ranjan.preet.singh@sap.com.',22000);
+      var notF=result.notFound||0,denied=result.denied||0;
+      if(notF>0){
+        /* IDs resolved but returned 404 — wrong ID format still? Should not happen after v34 fix. */
+        console.warn('[v34 DIAGNOSIS] '+notF+' 404 not-found: IDs may still be in wrong format. '+
+          'Check "Batch ID sample" log above. First-hit listItemID: '+
+          (ids[0]||'(none)'));
+        spToast('\u26A0 Batch returned 404 for '+notF+' items. Check console for ID sample.',15000);
+      }else if(denied>0){
+        /* Correct numeric IDs but ACL-blocked — item-level permissions override Full Control */
+        console.warn('[v34 FINAL DIAGNOSIS] '+denied+' items denied (403). '+
+          'Full Control at list level does NOT bypass Graph API item-level ACL. '+
+          'ONLY REMAINING FIX: Assign ranjan.preet.singh@sap.com as Site Collection Admin. '+
+          'Path: Microsoft 365 Admin Centre \u2192 SharePoint Admin Centre \u2192 '+
+          'Active Sites \u2192 BLR QRT site \u2192 Permissions tab \u2192 Site Admins \u2192 Add.');
+        spToast('\u26A0 All code-based paths exhausted. Only remaining fix: '+
+          'SharePoint Admin Centre \u2192 Active Sites \u2192 BLR QRT site \u2192 Site Admins \u2192 '+
+          'add ranjan.preet.singh@sap.com.',22000);
+      }else{
+        console.warn('[v34 DIAGNOSIS] 0 items, 0 denied, 0 not-found, other='+result.other+
+          '. Possible $batch format error — check console above.');
+        spToast('\u26A0 Batch returned no data and no errors. Check console.',15000);
+      }
     }
     return result.items;
   }catch(e){
-    console.warn('[v33] graphSearchAndBatchFetch exception:',e.message||e);
+    console.warn('[v34] graphSearchAndBatchFetch exception:',e.message||e);
     return[];
   }
 }
@@ -1254,24 +1294,24 @@ async function initSP(){
       /* v32: three fetch paths — use whichever returns the MOST records.
          Path 1 (Graph-Filtered):   Graph Items API with $filter by PseudoUserCode.
                                     Restricted by item-level ACL → only own records (110).
-         Path 2 (Search+Batch):     NEW v32 — Search by Title:"email", collect item IDs,
-                                    batch-fetch full fields via Graph $batch. Site-owner
-                                    search trimming bypasses item-level ACL for discovery.
-                                    Full Control at list level should allow individual reads.
+         Path 2 (Search+Inline/Batch): v33 — Search by Title:"email", collect item objects
+                                    with inline field data (site-owner trimming bypasses
+                                    item-level ACL). Uses fields directly (Path 2a) or
+                                    falls back to Graph $batch by item ID (Path 2b).
          Path 3 (SP-Token):         SharePoint REST with AllSites.Read scope.
                                     Falls back to [] if scope not consented. */
       var graphItems=await graphFetchAllItems();
-      console.log('[v33] Path 1 (Graph-Filtered):',graphItems.length,'items.');
+      console.log('[v34] Path 1 (Graph-Filtered):',graphItems.length,'items.');
       var searchBatchItems=await graphSearchAndBatchFetch();
-      console.log('[v33] Path 2 (Search+Inline/Batch):',searchBatchItems.length,'items.');
+      console.log('[v34] Path 2 (Search+Inline/Batch):',searchBatchItems.length,'items.');
       var spTokenItems=await spFetchAllItemsViaSharePointToken();
-      console.log('[v33] Path 3 (SP-Token):',spTokenItems.length,'items.');
+      console.log('[v34] Path 3 (SP-Token):',spTokenItems.length,'items.');
       /* Pick the path with the most records */
       var paths=[{name:'Graph-Filtered',items:graphItems},{name:'Search+Inline',items:searchBatchItems},{name:'SP-Token',items:spTokenItems}];
       paths.sort(function(a,b){return b.items.length-a.items.length;});
       var best=paths[0];
       var items=best.items;
-      console.log('[v33] Best path: "'+best.name+'" ('+items.length+' items). Others: '+paths.slice(1).map(function(p){return p.name+'='+p.items.length;}).join(', '));
+      console.log('[v34] Best path: "'+best.name+'" ('+items.length+' items). Others: '+paths.slice(1).map(function(p){return p.name+'='+p.items.length;}).join(', '));
       if(best.name!=='Graph-Filtered'&&items.length>graphItems.length){
         spToast('\u2713 '+best.name+' returned more records ('+items.length+' vs '+graphItems.length+' via Graph). Using expanded dataset.',8000);
       }
