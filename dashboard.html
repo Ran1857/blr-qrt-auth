@@ -413,14 +413,18 @@ async function graphGetSiteId(){
   if(!r.ok)throw new Error('getSiteId: '+r.status);
   _graphSiteId=(await r.json()).id;return _graphSiteId;
 }
-/* v30: Known PseudoUserCode values for all 15 BLR QRT users.
+/* v30: Known PseudoUserCode values for all 16 BLR QRT users.
    Used to build a server-side $filter so we only pull these records from
    the 42,128-item list — instead of paginating through all 42 K rows.
    Requires PseudoUserCode to be an indexed column in SharePoint.
    If the filter is rejected (column not indexed / threshold error) we fall
-   back automatically to the unfiltered paginated fetch. */
+   back automatically to the unfiltered paginated fetch.
+   v38 fix: Pavithra VS (Reviewer 0323) has a leading space in PseudoUserCode
+   in SharePoint (' Reviewer 0323' instead of 'Reviewer 0323'). The space-prefixed
+   variant is included so the Graph $filter also matches her records. normalizeUser()
+   already applies .trim() on every read, so AU/FROWS always store the clean value. */
 var SP_KNOWN_CODES=['Reviewer 0318','Reviewer 0319','Reviewer 0320','Reviewer 0321',
-  'Reviewer 0322','Reviewer 0323','Reviewer 0324','Reviewer 0325','Reviewer 0326',
+  'Reviewer 0322','Reviewer 0323',' Reviewer 0323','Reviewer 0324','Reviewer 0325','Reviewer 0326',
   'Supervisor 1207','Manager 0030','Manager 0033','Manager 0034','Manager 0053',
   'Support 0346','Support 0411'];
 /* v32: email addresses corresponding to each SP_KNOWN_CODE (same order).
@@ -436,7 +440,7 @@ var SP_USER_EMAILS=[
 async function graphFetchAllItems(){
   var siteId=await graphGetSiteId();
   var baseUrl='https://graph.microsoft.com/v1.0/sites/'+siteId+'/lists/'+encodeURIComponent(SP_CONFIG.listName)+'/items';
-  /* v30: build $filter from the 16 known PseudoUserCode values */
+  /* v30/v38: build $filter from SP_KNOWN_CODES (17 entries: 16 users + 1 space-prefixed variant for Reviewer 0323) */
   var filterStr=SP_KNOWN_CODES.map(function(c){
     return 'fields/'+SP_CONFIG.fields.user+' eq \''+c+'\'';
   }).join(' or ');
