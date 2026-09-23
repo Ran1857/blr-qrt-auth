@@ -1194,17 +1194,37 @@ var PIN_HASH_TO_USER={
 };
 
 function upKPI(){
-  var uSel=document.getElementById('fu').value,aSel=document.getElementById('fa').value,sSel=document.getElementById('fs').value,mSel=document.getElementById('fm').value;
-  var ui=uSel?AU.indexOf(uSel):-1,ai=aSel?AA.indexOf(aSel):-1,mi=mSel?MR.indexOf(mSel):-1;
-  var sc=sSel===''?-1:(sSel==='Completed'?0:1);
-  var t=0,co=0,ru=0,mins=0,uSet={};
-  for(var k=0;k<KROWS.length;k++){var r=KROWS[k];if(ui>=0&&r[0]!==ui)continue;if(mi>=0&&r[1]!==mi)continue;if(ai>=0&&r[2]!==ai)continue;if(sc>=0&&r[3]!==sc)continue;t++;if(r[3]===0)co++;else if(r[3]===1)ru++;mins+=r[4];uSet[r[0]]=1;}
+  /* v42: compute KPIs directly from FR so all filters (incl. date range) are reflected */
+  var t=FR.length,co=0,ru=0,mins=0,uSet={};
+  for(var k=0;k<t;k++){var r=FR[k];if(r[6]===0)co++;else if(r[6]===1)ru++;mins+=r[3]||0;uSet[r[0]]=1;}
   function fmtN(n){return Number(n).toLocaleString();}
-  document.getElementById('k0').textContent=fmtN(t);document.getElementById('k1').textContent=fmtN(co);document.getElementById('k4').textContent=fmtN(ru);document.getElementById('k2').textContent=fmtN(parseFloat((mins/60).toFixed(1)));document.getElementById('k1r').textContent=(t>0?(co/t*100).toFixed(1):'0.0')+'% completion rate';document.getElementById('k3').textContent=Object.keys(uSet).length;
+  document.getElementById('k0').textContent=fmtN(t);
+  document.getElementById('k1').textContent=fmtN(co);
+  document.getElementById('k4').textContent=fmtN(ru);
+  document.getElementById('k2').textContent=fmtN(parseFloat((mins/60).toFixed(1)));
+  document.getElementById('k1r').textContent=(t>0?(co/t*100).toFixed(1):'0.0')+'% completion rate';
+  document.getElementById('k3').textContent=Object.keys(uSet).length;
   var lbl=document.getElementById('tlbl');if(lbl)lbl.textContent=fmtN(FR.length)+' record'+(FR.length!==1?'s':'')+' matching current filters';
+  /* Data Period card: reflect active date-range filter if set, else show full dataset range */
   var dpEl=document.getElementById('kDataPeriod'),drEl=document.getElementById('kDateRange');
-  if(dpEl&&drEl&&MONTHS.length>0){dpEl.textContent=MONTHS.length+' Month'+(MONTHS.length!==1?'s':'');drEl.textContent=MONTHS[0]+' \u2014 '+MONTHS[MONTHS.length-1];}
-  else if(dpEl&&drEl){dpEl.textContent='No data';drEl.textContent='Load a CSV or connect SharePoint';}
+  if(dpEl&&drEl){
+    var fdv=(document.getElementById('fDateFrom')||{}).value;
+    var tdv=(document.getElementById('fDateTo')||{}).value;
+    if((fdv||tdv)&&(fdv||_DR_MIN_TS)&&(tdv||_DR_MAX_TS)){
+      var fStr=fdv||(new Date(_DR_MIN_TS).toISOString().slice(0,10));
+      var tStr=tdv||(new Date(_DR_MAX_TS).toISOString().slice(0,10));
+      var fD=new Date(fStr),tD=new Date(tStr);
+      var mDiff=Math.max(1,(tD.getFullYear()-fD.getFullYear())*12+(tD.getMonth()-fD.getMonth())+1);
+      var fmtMon=function(d){return d.toLocaleString('default',{month:'short',year:'numeric'});};
+      dpEl.textContent=mDiff+' Month'+(mDiff!==1?'s':'');
+      drEl.textContent=fmtMon(fD)+' \u2014 '+fmtMon(tD);
+    } else if(MONTHS.length>0){
+      dpEl.textContent=MONTHS.length+' Month'+(MONTHS.length!==1?'s':'');
+      drEl.textContent=MONTHS[0]+' \u2014 '+MONTHS[MONTHS.length-1];
+    } else {
+      dpEl.textContent='No data';drEl.textContent='Load a CSV or connect SharePoint';
+    }
+  }
 }
 
 var _tblTmr=null;
