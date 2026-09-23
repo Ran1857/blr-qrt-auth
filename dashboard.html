@@ -154,6 +154,24 @@ tr:hover td{background:#F8F9FB}tr:last-child td{border-bottom:none}
 .stCompleted{background:#E6F5EC;color:#1A7840;padding:2px 10px;border-radius:10px;font-size:11px;font-weight:700;display:inline-block}
 .stRunning{background:#FEF3CD;color:#7A5200;padding:2px 10px;border-radius:10px;font-size:11px;font-weight:700;display:inline-block}
 .stOther{background:#E8ECF5;color:#00144A;padding:2px 10px;border-radius:10px;font-size:11px;font-weight:700;display:inline-block}
+/* v41: sortable column headers */
+th.thSort{cursor:pointer;user-select:none}
+th.thSort:hover{background:#E0EAF8;color:#00144A}
+.sortInd{color:#0070F2;font-size:10px;margin-left:3px;vertical-align:middle}
+/* v41: date-range slicer */
+.dateRangeFg{min-width:240px}
+.drWrap{display:flex;flex-direction:column;gap:5px}
+.drInputs{display:flex;align-items:center;gap:5px}
+.drInputs input[type="date"]{padding:5px 7px;border:1px solid #E1E2E6;border-radius:6px;font-size:12px;color:#32363A;background:#fff;outline:none;width:128px;cursor:pointer}
+.drInputs input[type="date"]:focus{border-color:#0070F2;box-shadow:0 0 0 2px rgba(0,112,242,.15)}
+.drSep{color:#6A7589;font-size:12px;flex-shrink:0}
+.drSliderBox{position:relative;height:24px;margin-top:4px}
+.drTrack{position:absolute;left:0;right:0;top:50%;height:4px;background:#E1E2E6;border-radius:2px;transform:translateY(-50%)}
+.drFill{position:absolute;height:100%;background:#0070F2;border-radius:2px;left:0;width:100%}
+.drs{-webkit-appearance:none;appearance:none;width:100%;height:4px;background:transparent;position:absolute;top:50%;transform:translateY(-50%);pointer-events:none;outline:none;margin:0;padding:0}
+.drs::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:#0070F2;cursor:pointer;pointer-events:all;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.25)}
+.drs::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:#0070F2;cursor:pointer;pointer-events:all;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.2)}
+.drs-lo{z-index:2}.drs-hi{z-index:3}
 .pgn{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:12px 18px;border-top:1px solid #E1E2E6}
 .pgn button{padding:5px 11px;border:1px solid #E1E2E6;border-radius:5px;font-size:12px;background:#fff;color:#32363A}
 .pgn button:disabled{opacity:.4;cursor:not-allowed}
@@ -247,6 +265,20 @@ tr:hover td{background:#F8F9FB}tr:last-child td{border-bottom:none}
     <div class="fg"><label>Activity</label><select id="fa" onchange="apF()"><option value="">All Activities</option></select></div>
     <div class="fg"><label>Status</label><select id="fs" onchange="apF()"><option value="">All Statuses</option><option>Completed</option><option>Running</option></select></div>
     <div class="fg"><label>Month</label><select id="fm" onchange="apF()"><option value="">All Months</option></select></div>
+    <div class="fg dateRangeFg"><label>Date Range</label>
+      <div class="drWrap">
+        <div class="drInputs">
+          <input type="date" id="fDateFrom" onchange="dateInputChanged()" title="From date">
+          <span class="drSep">–</span>
+          <input type="date" id="fDateTo" onchange="dateInputChanged()" title="To date">
+        </div>
+        <div class="drSliderBox">
+          <div class="drTrack"><div class="drFill" id="drFill"></div></div>
+          <input type="range" id="sliderFrom" class="drs drs-lo" min="0" max="1000" value="0" oninput="drSliderMove(this,'from')">
+          <input type="range" id="sliderTo"   class="drs drs-hi" min="0" max="1000" value="1000" oninput="drSliderMove(this,'to')">
+        </div>
+      </div>
+    </div>
     <div class="fg searchFg"><label>Search</label><input id="tsrch" type="text" placeholder="Keyword search..." oninput="apF2()"></div>
     <button class="resetBtn" onclick="rsF()">Reset Filters</button>
     <span class="filterCount" id="tlbl"></span>
@@ -263,7 +295,25 @@ tr:hover td{background:#F8F9FB}tr:last-child td{border-bottom:none}
   <div class="chart full" style="margin-bottom:20px"><div class="chartTitle">Activity Volume by Month</div><div class="chartSub">Completed vs Running sessions per calendar month</div><canvas id="cM" height="220"></canvas></div>
   <div class="tblWrap">
     <div class="tblHead"><div><div class="tblTitle">Activity Records</div><div class="tblSub" id="tlbl2"></div></div><div class="tblActions"><input class="tblSearch" id="tsrch2" placeholder="Search records..." oninput="apF2()"></div></div>
-    <table><thead><tr><th>Pseudo User Code</th><th>Activity/Task</th><th>ClientName</th><th>No. of Reports</th><th>StartDateandTime_IST</th><th>EndDateandTime_IST</th><th>Time Spent (Start-End)</th><th>Status</th><th>StatusUpdatedTime_IST</th><th>Batch/ReportIds</th><th>ReportID</th><th>BatchID</th><th>NumberofQuestions</th><th>NumberofLines</th><th>NumberofInvoices</th><th>NumberofLineItems</th><th>Comments/Remarks</th></tr></thead><tbody id="tblBody"></tbody></table>
+    <table><thead><tr>
+<th class="thSort" onclick="sortByCol(0)">Pseudo User Code<span class="sortInd">⇅</span></th>
+<th class="thSort" onclick="sortByCol(1)">Activity/Task<span class="sortInd">⇅</span></th>
+<th class="thSort" onclick="sortByCol(2)">ClientName<span class="sortInd">⇅</span></th>
+<th class="thSort" onclick="sortByCol(3)">No. of Reports<span class="sortInd">⇅</span></th>
+<th class="thSort" onclick="sortByCol(4)">StartDateandTime_IST<span class="sortInd">⇅</span></th>
+<th class="thSort" onclick="sortByCol(5)">EndDateandTime_IST<span class="sortInd">⇅</span></th>
+<th class="thSort" onclick="sortByCol(6)">Time Spent (Start-End)<span class="sortInd">⇅</span></th>
+<th class="thSort" onclick="sortByCol(7)">Status<span class="sortInd">⇅</span></th>
+<th class="thSort" onclick="sortByCol(8)">StatusUpdatedTime_IST<span class="sortInd">⇅</span></th>
+<th class="thSort" onclick="sortByCol(9)">Batch/ReportIds<span class="sortInd">⇅</span></th>
+<th class="thSort" onclick="sortByCol(10)">ReportID<span class="sortInd">⇅</span></th>
+<th class="thSort" onclick="sortByCol(11)">BatchID<span class="sortInd">⇅</span></th>
+<th class="thSort" onclick="sortByCol(12)">NumberofQuestions<span class="sortInd">⇅</span></th>
+<th class="thSort" onclick="sortByCol(13)">NumberofLines<span class="sortInd">⇅</span></th>
+<th class="thSort" onclick="sortByCol(14)">NumberofInvoices<span class="sortInd">⇅</span></th>
+<th class="thSort" onclick="sortByCol(15)">NumberofLineItems<span class="sortInd">⇅</span></th>
+<th class="thSort" onclick="sortByCol(16)">Comments/Remarks<span class="sortInd">⇅</span></th>
+</tr></thead><tbody id="tblBody"></tbody></table>
     <div class="pgn"><button id="pPrev" onclick="goPage(-1)">&#8592; Prev</button><span id="pInfo"></span><button id="pNext" onclick="goPage(1)">Next &#8594;</button></div>
   </div>
 </div>
@@ -347,6 +397,30 @@ var MONTHS=[],MR=[],AU=[],AA=[],FROWS_ALL=[],KROWS_ALL=[],FR=[],FROWS=[],KROWS=[
 var _SP_OFFLINE=false,_SP_ERROR=null,_spLastItemCount=0,_SP_POLL_TMR=null;
 var _graphToken=null,_msal=null,_msalAccount=null,_graphSiteId=null;
 var _RLS_IDX=-1,_PIN_ATTEMPTS=0,cP=1,PAGE_SIZE=50,_D={};
+/* v41: sort state */
+var _sortCol=-1,_sortDir=1;
+/* v41: date-range slider state */
+var _DR_MIN_TS=0,_DR_MAX_TS=0;
+/* v41: column value getters (index matches onclick="sortByCol(N)") */
+var _SORT_COLS=[
+  function(r){return (AU[r[0]]||'').toLowerCase();},          /* 0  Pseudo User Code   */
+  function(r){return (AA[r[4]]||'').toLowerCase();},          /* 1  Activity/Task      */
+  function(r){return (r[7]||'').toLowerCase();},              /* 2  ClientName         */
+  function(r){return parseFloat(r[8])||0;},                   /* 3  No. of Reports     */
+  function(r){return r[1]||'';},                              /* 4  StartDateandTime   */
+  function(r){return r[2]||'';},                              /* 5  EndDateandTime     */
+  function(r){return r[17]||'';},                             /* 6  Time Spent         */
+  function(r){return r[6];},                                  /* 7  Status             */
+  function(r){return r[9]||'';},                              /* 8  StatusUpdatedTime  */
+  function(r){return (r[5]||'').toLowerCase();},              /* 9  Batch/ReportIds    */
+  function(r){return (r[10]||'').toLowerCase();},             /* 10 ReportID           */
+  function(r){return (r[11]||'').toLowerCase();},             /* 11 BatchID            */
+  function(r){return parseFloat(r[12])||0;},                  /* 12 NumberofQuestions  */
+  function(r){return parseFloat(r[13])||0;},                  /* 13 NumberofLines      */
+  function(r){return parseFloat(r[14])||0;},                  /* 14 NumberofInvoices   */
+  function(r){return parseFloat(r[15])||0;},                  /* 15 NumberofLineItems  */
+  function(r){return (r[16]||'').toLowerCase();}              /* 16 Comments/Remarks   */
+];
 var CLRS=['#0070F2','#F0AB00','#1A7840','#00144A','#6A5ACD','#E44D26','#00A9CE','#F56C2D','#8B5CF6','#059669'];
 
 async function msalInit(){
@@ -1037,6 +1111,7 @@ function rebuildDropdowns(){
   console.log('[v36] rebuildDropdowns: MONTHS=',MONTHS.length,'MR=',MR.length,'AU=',AU.length,'AA=',AA.length);
   fillSel('fu',AU);fillSel('fa',AA);fillSel('fm',MONTHS,MR);
   var hdr=document.getElementById('hdrCount');if(hdr)hdr.textContent=FROWS_ALL.length.toLocaleString();
+  initDateRange(FROWS_ALL);
 }
 /* FIX v20: defensive AU/AA guard in spApply */
 function spApply(data,source){
@@ -1071,20 +1146,30 @@ function apF(){
   var uSel=(_RLS_IDX>=0)?'':document.getElementById('fu').value;
   var aSel=document.getElementById('fa').value,sSel=document.getElementById('fs').value,mSel=document.getElementById('fm').value;
   var q=(document.getElementById('tsrch').value||document.getElementById('tsrch2').value||'').toLowerCase();
+  var dateFrom=(document.getElementById('fDateFrom')||{}).value||'';
+  var dateTo=(document.getElementById('fDateTo')||{}).value||'';
   var ui=(_RLS_IDX>=0)?_RLS_IDX:(uSel?AU.indexOf(uSel):-1);
   var ai=aSel?AA.indexOf(aSel):-1;var sc=sSel===''?-1:(sSel==='Completed'?0:1);
   FR=FROWS.filter(function(r){
     if(ui>=0&&r[0]!==ui)return false;if(ai>=0&&r[4]!==ai)return false;if(sc>=0&&r[6]!==sc)return false;
     if(mSel&&r[1].substring(0,7)!==mSel)return false;
+    if(dateFrom&&r[1]&&r[1].substring(0,10)<dateFrom)return false;
+    if(dateTo&&r[1]&&r[1].substring(0,10)>dateTo)return false;
     if(q){var row=AU[r[0]]+'|'+r[1]+'|'+r[2]+'|'+r[3]+'|'+AA[r[4]]+'|'+r[5];if(row.toLowerCase().indexOf(q)===-1)return false;}
     return true;
   });
+  _applySortToFR();
   cP=1;rdTbl();upKPI();
 }
 function apF2(){apF();}
 function rsF(){
   var keep=['tsrch','tsrch2','fa','fs','fm'];if(_RLS_IDX<0)keep.push('fu');
   keep.forEach(function(id){var el=document.getElementById(id);if(el)el.value='';});
+  var fd=document.getElementById('fDateFrom'),td=document.getElementById('fDateTo');
+  if(fd)fd.value='';if(td)td.value='';
+  var sf=document.getElementById('sliderFrom'),st=document.getElementById('sliderTo');
+  if(sf)sf.value=0;if(st)st.value=1000;drUpdateFill();
+  _sortCol=-1;_sortDir=1;_updateSortHeaders();
   FR=FROWS.slice();cP=1;rdTbl();upKPI();
 }
 
@@ -1136,6 +1221,78 @@ function _rdTbl(){
   var lbl2=document.getElementById('tlbl2');if(lbl2)lbl2.textContent=total.toLocaleString()+' records';
 }
 function esc(s){if(!s)return '';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+/* ── SORT ──────────────────────────────────────────────────────────────── */
+function sortByCol(ci){
+  if(_sortCol===ci){_sortDir*=-1;}else{_sortCol=ci;_sortDir=1;}
+  _updateSortHeaders();_applySortToFR();cP=1;rdTbl();
+}
+function _applySortToFR(){
+  if(_sortCol<0||!FR.length)return;
+  var g=_SORT_COLS[_sortCol],sd=_sortDir;
+  FR.sort(function(a,b){
+    var av=g(a),bv=g(b);
+    if(typeof av==='number'&&typeof bv==='number')return sd*(av-bv);
+    var as=String(av),bs=String(bv);return sd*(as<bs?-1:as>bs?1:0);
+  });
+}
+function _updateSortHeaders(){
+  var ths=document.querySelectorAll('th.thSort');
+  ths.forEach(function(th,i){
+    var ind=th.querySelector('.sortInd');if(!ind)return;
+    ind.textContent=(_sortCol===i)?(_sortDir===1?' \u25B2':' \u25BC'):'\u21C5';
+  });
+}
+/* ── DATE-RANGE SLICER ──────────────────────────────────────────────────── */
+function initDateRange(frows){
+  var min=Infinity,max=-Infinity;
+  (frows||[]).forEach(function(r){
+    if(!r[1])return;
+    var t=new Date(r[1].replace(' ','T')+':00+05:30').getTime();
+    if(!isNaN(t)){if(t<min)min=t;if(t>max)max=t;}
+  });
+  if(min===Infinity)return;
+  _DR_MIN_TS=min;_DR_MAX_TS=(max>min)?max:min+86400000;
+  var minD=new Date(min).toISOString().slice(0,10);
+  var maxD=new Date(_DR_MAX_TS).toISOString().slice(0,10);
+  var fd=document.getElementById('fDateFrom'),td=document.getElementById('fDateTo');
+  if(fd){fd.min=minD;fd.max=maxD;fd.value='';}
+  if(td){td.min=minD;td.max=maxD;td.value='';}
+  var sf=document.getElementById('sliderFrom'),st=document.getElementById('sliderTo');
+  if(sf)sf.value=0;if(st)st.value=1000;drUpdateFill();
+}
+function drSliderMove(el,which){
+  var sf=parseInt(document.getElementById('sliderFrom').value||0);
+  var st=parseInt(document.getElementById('sliderTo').value||1000);
+  if(which==='from'&&sf>st){sf=st;document.getElementById('sliderFrom').value=sf;}
+  if(which==='to'&&st<sf){st=sf;document.getElementById('sliderTo').value=st;}
+  if(_DR_MAX_TS>_DR_MIN_TS){
+    var rng=_DR_MAX_TS-_DR_MIN_TS;
+    var fd=document.getElementById('fDateFrom'),td=document.getElementById('fDateTo');
+    if(fd)fd.value=new Date(_DR_MIN_TS+Math.round(sf/1000*rng)).toISOString().slice(0,10);
+    if(td)td.value=new Date(_DR_MIN_TS+Math.round(st/1000*rng)).toISOString().slice(0,10);
+  }
+  drUpdateFill();apF();
+}
+function dateInputChanged(){
+  if(_DR_MAX_TS>_DR_MIN_TS){
+    var fdv=(document.getElementById('fDateFrom')||{}).value;
+    var tdv=(document.getElementById('fDateTo')||{}).value;
+    var rng=_DR_MAX_TS-_DR_MIN_TS;
+    var fTs=fdv?new Date(fdv).getTime():_DR_MIN_TS;
+    var tTs=tdv?new Date(tdv).getTime():_DR_MAX_TS;
+    var sf=document.getElementById('sliderFrom'),st=document.getElementById('sliderTo');
+    if(sf)sf.value=Math.round(Math.max(0,Math.min(1000,(fTs-_DR_MIN_TS)/rng*1000)));
+    if(st)st.value=Math.round(Math.max(0,Math.min(1000,(tTs-_DR_MIN_TS)/rng*1000)));
+    drUpdateFill();
+  }
+  apF();
+}
+function drUpdateFill(){
+  var sf=parseInt((document.getElementById('sliderFrom')||{}).value||0);
+  var st=parseInt((document.getElementById('sliderTo')||{}).value||1000);
+  var fill=document.getElementById('drFill');
+  if(fill){fill.style.left=(sf/10)+'%';fill.style.width=((st-sf)/10)+'%';}
+}
 function goPage(d){var pages=Math.ceil(FR.length/PAGE_SIZE);cP=Math.max(1,Math.min(cP+d,pages));rdTbl();}
 
 function computeD(krows){
@@ -1378,7 +1535,8 @@ async function initSP(){
             'SharePoint Admin Centre \u2192 Active Sites \u2192 BLR QRT site \u2192 Permissions \u2192 Site Admins \u2192 Add.');
           var ab=document.getElementById('adminBanner');
           if(ab){
-            ab.style.display='flex';
+            /* v41: admin banner permanently hidden — do not display */
+            // ab.style.display='flex';
             var at=document.getElementById('adminBannerTxt');
             if(at)at.innerHTML=
               '<strong>\u26A0 Partial data \u2014 only '+uCount+' of 16 users visible.</strong> '+
@@ -1386,7 +1544,8 @@ async function initSP(){
               'Fix: SharePoint Admin Centre \u2192 Active Sites \u2192 BLR QRT site \u2192 Permissions \u2192 Site Admins \u2192 '+
               'add <strong>ranjan.preet.singh@sap.com</strong> as Site Collection Admin.';
           }
-          spToast('\u26A0 Only '+uCount+'/16 users visible. See admin banner for fix instructions.',12000);
+          /* v41: admin toast also suppressed */
+          // spToast('\u26A0 Only '+uCount+'/16 users visible. See admin banner for fix instructions.',12000);
         }
       })();
       tryRestoreSession();
