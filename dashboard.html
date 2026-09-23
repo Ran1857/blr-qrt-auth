@@ -1190,7 +1190,8 @@ var PIN_HASH_TO_USER={
   "ae08ef776d536d49e5fea11b34a4f2cf981195fee6ec8cfb058ae2686a9d0166":"Manager 0053",
   "408750da3f14b5c8f446ba2ed05c3e2cd7c77804e5acccd5114a2b079b3c5697":"Support 0346",
   "587887b1f664c61a994f9e4cbf72e138f42d54d4d0e95a1722f3d5b304d46049":"Support 0411",
-  "854e995a2a9b14f46866d2a0d61eba8ab23a247c31c53a79c557daaebbfa7c8f":"Manager0030"
+  "854e995a2a9b14f46866d2a0d61eba8ab23a247c31c53a79c557daaebbfa7c8f":"Manager0030",
+  "a9b9bd8e0ec83c8374c3c83178e416add3f6c8e0011164a40ee91a333b433384":"Executive View"
 };
 
 function upKPI(){
@@ -1453,7 +1454,7 @@ async function spPoll(){
   spSchedulePoll();
 }
 
-function isPrivileged(name){return /^(Manager|Supervisor)/i.test(name);}
+function isPrivileged(name){return /^(Manager|Supervisor|Executive)/i.test(name);}
 
 async function doLogin(){
   var pin=document.getElementById('pinInput').value.trim();
